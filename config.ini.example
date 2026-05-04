@@ -1,0 +1,27 @@
+# config.ini.example
+# ─────────────────────────────────────────────────────────────
+# Copia questo file in config.ini e personalizza i valori.
+#   cp config.ini.example config.ini
+#
+# config.ini è in .gitignore: non verrà mai committato.
+# ─────────────────────────────────────────────────────────────
+
+[metasploit]
+# Password impostata all'avvio di msfrpcd (-P <password>)
+password = CAMBIA_QUESTA_PASSWORD
+host     = 127.0.0.1
+port     = 55553
+
+[scanner]
+# Directory dove salvare XML, JSON e database
+output_dir = ./results
+
+# Secondi tra un polling del MeterpreterMonitor e l'altro
+monitor_interval = 5
+
+# Secondi di attesa extra dopo la fine della pipeline,
+# per catturare payload staged con tempi di connessione variabili
+post_pipeline_wait = 10
+
+[database]
+path = ./results/scanner.db
