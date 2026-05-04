@@ -1,211 +1,673 @@
-/**
+k/**
  * scanner_runner.cpp
- * Esegue Nmap e Searchsploit e comunica con il logic-mapper Python.
- * Compilare con: g++ -o scanner_runner scanner_runner.cpp -std=c++17
+ * ─────────────────────────────────────────────────────────────────
+ * AutoPwn Scanner — CLI integrata in C++
+ *
+ * MODALITÀ INTERATTIVA:   ./scanner_runner
+ * MODALITÀ DIRETTA:       ./scanner_runner <comando> [argomenti]
+ *
+ * Comandi diretti:
+ *   scan   <target>        Pipeline completa (Nmap + Searchsploit + MSF)
+ *   nmap   <target>        Solo scansione Nmap
+ *   report                 Mostra report dal database SQLite
+ *   sessions               Elenca sessioni MSF aperte
+ *   config                 Configura config.ini in modo interattivo
+ *   help                   Mostra questo aiuto
+ *
+ * Compilare con:
+ *   g++ -o scanner_runner scanner_runner.cpp -std=c++17
+ * ─────────────────────────────────────────────────────────────────
  */
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <vector>
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <stdexcept>
-#include <filesystem>
-#include <chrono>
+#include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
-// ─────────────────────────────────────────────
-// Utility: esegue un comando e ne cattura stdout
-// ─────────────────────────────────────────────
-std::string exec_command(const std::string& cmd) {
-    std::string result;
-    char buffer[256];
+// ═════════════════════════════════════════════════════════════════
+// ANSI COLOR HELPERS
+// ═════════════════════════════════════════════════════════════════
+namespace Color {
+    const std::string RESET   = "\033[0m";
+    const std::string BOLD    = "\033[1m";
+    const std::string DIM     = "\033[2m";
+    const std::string RED     = "\033[91m";
+    const std::string GREEN   = "\033[92m";
+    const std::string YELLOW  = "\033[93m";
+    const std::string BLUE    = "\033[94m";
+    const std::string MAGENTA = "\033[95m";
+    const std::string CYAN    = "\033[96m";
+    const std::string WHITE   = "\033[97m";
 
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) {
-        throw std::runtime_error("popen() fallito per: " + cmd);
-    }
-
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
-    }
-
-    int exit_code = pclose(pipe);
-    if (exit_code != 0) {
-        std::cerr << "[WARN] Comando terminato con codice " << exit_code
-                  << ": " << cmd << "\n";
-    }
-    return result;
+    std::string bold(const std::string& s)    { return BOLD    + s + RESET; }
+    std::string red(const std::string& s)     { return RED     + s + RESET; }
+    std::string green(const std::string& s)   { return GREEN   + s + RESET; }
+    std::string yellow(const std::string& s)  { return YELLOW  + s + RESET; }
+    std::string cyan(const std::string& s)    { return CYAN    + s + RESET; }
+    std::string magenta(const std::string& s) { return MAGENTA + s + RESET; }
+    std::string dim(const std::string& s)     { return DIM     + s + RESET; }
 }
 
-// ─────────────────────────────────────────────
-// Classe: NmapRunner
-// ─────────────────────────────────────────────
-class NmapRunner {
+// ═════════════════════════════════════════════════════════════════
+// CONFIG READER  (config.ini → key=value, sezioni [section])
+// ═════════════════════════════════════════════════════════════════
+class Config {
 public:
-    std::string target;
-    std::string output_xml;
-    std::string output_dir;
+    // Valori di default
+    std::string msf_password        = "change_this_password";
+    std::string msf_host            = "127.0.0.1";
+    std::string msf_port            = "55553";
+    std::string output_dir          = "./results";
+    std::string monitor_interval    = "5";
+    std::string post_pipeline_wait  = "10";
+    std::string db_path             = "./results/scanner.db";
+    std::string config_path         = "config.ini";
 
-    NmapRunner(const std::string& t, const std::string& dir = "./results")
-        : target(t), output_dir(dir) {
-        fs::create_directories(dir);
-        output_xml = dir + "/scan_" + sanitize(t) + ".xml";
-    }
+    void load(const std::string& path = "config.ini") {
+        config_path = path;
+        std::ifstream f(path);
+        if (!f.is_open()) return;
 
-    // Avvia la scansione Nmap con rilevamento versioni + script vulners
-    bool run() {
-        std::string cmd = "nmap -sV --script=vulners -oX "
-                          + output_xml + " " + target + " 2>&1";
-
-        std::cout << "[NMAP] Avvio scansione su: " << target << "\n";
-        std::cout << "[NMAP] Output XML -> " << output_xml << "\n";
-        std::cout << "[NMAP] Comando: " << cmd << "\n\n";
-
-        try {
-            std::string out = exec_command(cmd);
-            std::cout << out << "\n";
-
-            if (fs::exists(output_xml)) {
-                std::cout << "[NMAP] Scansione completata. File XML creato.\n";
-                return true;
-            } else {
-                std::cerr << "[NMAP] ERRORE: file XML non trovato.\n";
-                return false;
+        std::string line, section;
+        while (std::getline(f, line)) {
+            line = trim(line);
+            if (line.empty() || line[0] == '#') continue;
+            if (line.front() == '[' && line.back() == ']') {
+                section = line.substr(1, line.size() - 2);
+                continue;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "[NMAP] Eccezione: " << e.what() << "\n";
-            return false;
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            std::string key = trim(line.substr(0, eq));
+            std::string val = trim(line.substr(eq + 1));
+            // rimuovi commento inline
+            auto hash = val.find('#');
+            if (hash != std::string::npos) val = trim(val.substr(0, hash));
+
+            if (section == "metasploit") {
+                if (key == "password") msf_password = val;
+                if (key == "host")     msf_host     = val;
+                if (key == "port")     msf_port     = val;
+            } else if (section == "scanner") {
+                if (key == "output_dir")         output_dir         = val;
+                if (key == "monitor_interval")   monitor_interval   = val;
+                if (key == "post_pipeline_wait") post_pipeline_wait = val;
+            } else if (section == "database") {
+                if (key == "path") db_path = val;
+            }
         }
     }
 
-    const std::string& get_xml_path() const { return output_xml; }
+    void save() const {
+        std::ofstream f(config_path);
+        if (!f.is_open()) {
+            std::cerr << Color::red("  [ERROR] Cannot write " + config_path + "\n");
+            return;
+        }
+        f << "# AutoPwn Scanner — config.ini\n";
+        f << "# Generated by CLI configurator — do NOT commit this file.\n\n";
+        f << "[metasploit]\n";
+        f << "password = " << msf_password << "\n";
+        f << "host     = " << msf_host     << "\n";
+        f << "port     = " << msf_port     << "\n\n";
+        f << "[scanner]\n";
+        f << "output_dir         = " << output_dir         << "\n";
+        f << "monitor_interval   = " << monitor_interval   << "\n";
+        f << "post_pipeline_wait = " << post_pipeline_wait << "\n\n";
+        f << "[database]\n";
+        f << "path = " << db_path << "\n";
+    }
 
 private:
-    // Rimuove caratteri non sicuri per usare il target come nome file
-    static std::string sanitize(const std::string& s) {
+    static std::string trim(const std::string& s) {
+        size_t a = s.find_first_not_of(" \t\r\n");
+        size_t b = s.find_last_not_of(" \t\r\n");
+        return (a == std::string::npos) ? "" : s.substr(a, b - a + 1);
+    }
+};
+
+// ═════════════════════════════════════════════════════════════════
+// UTILITY
+// ═════════════════════════════════════════════════════════════════
+
+// Esegue un comando shell e restituisce stdout (stampa in real-time)
+int exec_stream(const std::string& cmd) {
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) throw std::runtime_error("popen() failed for: " + cmd);
+    char buf[256];
+    while (fgets(buf, sizeof(buf), pipe)) std::cout << buf;
+    return pclose(pipe);
+}
+
+// Esegue un comando e restituisce stdout come stringa
+std::string exec_capture(const std::string& cmd) {
+    std::string result;
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    char buf[256];
+    while (fgets(buf, sizeof(buf), pipe)) result += buf;
+    pclose(pipe);
+    return result;
+}
+
+std::string sanitize_filename(const std::string& s) {
+    std::string out;
+    for (char c : s) out += (std::isalnum(c) || c == '.') ? c : '_';
+    return out;
+}
+
+std::string timestamp() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t t = std::chrono::system_clock::to_time_t(now);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
+    return buf;
+}
+
+void print_divider(const std::string& seg = "\xe2\x94\x80", int reps = 55) {
+    std::cout << Color::DIM;
+    for (int i = 0; i < reps; ++i) std::cout << seg;
+    std::cout << Color::RESET << "\n";
+}
+
+// Input con prompt colorato e valore di default
+std::string prompt_input(const std::string& label,
+                          const std::string& def = "") {
+    std::cout << Color::CYAN << "  " << label;
+    if (!def.empty()) std::cout << Color::DIM << " [" << def << "]";
+    std::cout << Color::CYAN << ": " << Color::RESET;
+    std::string line;
+    std::getline(std::cin, line);
+    return line.empty() ? def : line;
+}
+
+// ═════════════════════════════════════════════════════════════════
+// BANNER
+// ═════════════════════════════════════════════════════════════════
+void print_banner() {
+    std::cout << "\n";
+    std::cout << Color::CYAN << Color::BOLD;
+    std::cout << "  ╔═══════════════════════════════════════════════╗\n";
+    std::cout << "  ║           AutoPwn Scanner  v1.0               ║\n";
+    std::cout << "  ║   Nmap · Searchsploit · Metasploit RPC        ║\n";
+    std::cout << "  ╚═══════════════════════════════════════════════╝\n";
+    std::cout << Color::RESET;
+    std::cout << Color::DIM << "  For authorized lab environments only.\n" << Color::RESET;
+    std::cout << "\n";
+}
+
+// ═════════════════════════════════════════════════════════════════
+// NMAP RUNNER
+// ═════════════════════════════════════════════════════════════════
+class NmapRunner {
+public:
+    explicit NmapRunner(const Config& cfg) : cfg_(cfg) {}
+
+    // Restituisce il path XML dell'ultimo scan, "" se fallito
+    std::string run(const std::string& target) {
+        fs::create_directories(cfg_.output_dir);
+        std::string xml = cfg_.output_dir + "/scan_"
+                          + sanitize_filename(target) + ".xml";
+
+        std::cout << "\n" << Color::bold("[NMAP]") << " Target: "
+                  << Color::yellow(target) << "\n";
+        std::cout << Color::DIM << "  XML → " << xml << "\n" << Color::RESET;
+        print_divider();
+
+        std::string cmd = "nmap -sV --script=vulners -oX "
+                          + xml + " " + target + " 2>&1";
+        int rc = exec_stream(cmd);
+
+        print_divider();
+        if (rc == 0 && fs::exists(xml)) {
+            std::cout << Color::green("  ✓ Scan complete. XML saved.\n");
+            last_xml_ = xml;
+            return xml;
+        }
+        std::cout << Color::red("  ✗ Nmap failed (exit " + std::to_string(rc) + ").\n");
+        return "";
+    }
+
+    const std::string& last_xml() const { return last_xml_; }
+
+private:
+    const Config& cfg_;
+    std::string   last_xml_;
+};
+
+// ═════════════════════════════════════════════════════════════════
+// SEARCHSPLOIT RUNNER
+// ═════════════════════════════════════════════════════════════════
+class SearchsploitRunner {
+public:
+    explicit SearchsploitRunner(const Config& cfg) : cfg_(cfg) {}
+
+    std::string run(const std::string& xml_path) {
+        std::string json_out = cfg_.output_dir + "/searchsploit_results.json";
+
+        std::cout << "\n" << Color::bold("[SEARCHSPLOIT]") << " Parsing XML...\n";
+        print_divider();
+
+        std::string cmd = "searchsploit --nmap " + xml_path + " -j 2>&1";
+        std::string result = exec_capture(cmd);
+
+        std::ofstream ofs(json_out);
+        if (ofs.is_open()) { ofs << result; }
+
+        std::cout << result;
+        print_divider();
+        std::cout << Color::green("  ✓ Results saved → " + json_out + "\n");
+        return json_out;
+    }
+
+private:
+    const Config& cfg_;
+};
+
+// ═════════════════════════════════════════════════════════════════
+// PYTHON BRIDGE  (logic_mapper.py)
+// ═════════════════════════════════════════════════════════════════
+class PythonBridge {
+public:
+    explicit PythonBridge(const Config& cfg) : cfg_(cfg) {}
+
+    bool invoke(const std::string& xml, const std::string& json) {
+        std::cout << "\n" << Color::bold("[LOGIC MAPPER]") << " Starting...\n";
+        print_divider();
+
+        std::string cmd = "python3 ./logic_mapper.py"
+                          " --xml "  + xml  +
+                          " --json " + json +
+                          " --monitor-interval " + cfg_.monitor_interval
+                          + " 2>&1";
+        int rc = exec_stream(cmd);
+        print_divider();
+        if (rc == 0) {
+            std::cout << Color::green("  ✓ Logic mapper completed.\n");
+            return true;
+        }
+        std::cout << Color::red("  ✗ Logic mapper exited with code "
+                                + std::to_string(rc) + "\n");
+        return false;
+    }
+
+private:
+    const Config& cfg_;
+};
+
+// ═════════════════════════════════════════════════════════════════
+// SESSION MANAGER  (chiama python3 per interrogare msfrpcd via RPC)
+// ═════════════════════════════════════════════════════════════════
+class SessionManager {
+public:
+    explicit SessionManager(const Config& cfg) : cfg_(cfg) {}
+
+    void list_sessions() {
+        std::cout << "\n" << Color::bold("[SESSIONS]")
+                  << " Querying Metasploit RPC...\n";
+        print_divider();
+
+        // Script Python inline: elenca sessioni via pymetasploit3
+        std::string script = R"python(
+import sys
+try:
+    from pymetasploit3.msfrpc import MsfRpcClient
+    c = MsfRpcClient(')" + cfg_.msf_password + R"python(',
+                       server=')" + cfg_.msf_host + R"python(',
+                       port=)" + cfg_.msf_port + R"python()
+    sessions = c.sessions.list
+    if not sessions:
+        print('  No open sessions.')
+    else:
+        print(f'  {"ID":<6} {"Type":<18} {"Host":<20} {"User":<16} {"Module"}')
+        print('  ' + '-'*80)
+        for sid, info in sessions.items():
+            print(f'  {sid:<6} {info.get("type","?"):<18} '
+                  f'{info.get("target_host","?"):<20} '
+                  f'{info.get("username","?"):<16} '
+                  f'{info.get("via_exploit","?")}')
+except ImportError:
+    print('  [ERROR] pymetasploit3 not installed.')
+except Exception as e:
+    print(f'  [ERROR] {e}')
+)python";
+
+        std::string cmd = "python3 -c \"" + escape_quotes(script) + "\"";
+        // Usiamo un file temporaneo per evitare problemi di escaping
+        std::ofstream tmp("/tmp/_autopwn_sessions.py");
+        tmp << script;
+        tmp.close();
+        exec_stream("python3 /tmp/_autopwn_sessions.py");
+        fs::remove("/tmp/_autopwn_sessions.py");
+        print_divider();
+    }
+
+    void kill_session() {
+        std::cout << "\n";
+        std::string sid = prompt_input("Session ID to kill");
+        if (sid.empty()) { std::cout << Color::yellow("  Cancelled.\n"); return; }
+
+        std::string script =
+            "from pymetasploit3.msfrpc import MsfRpcClient\n"
+            "c = MsfRpcClient('" + cfg_.msf_password + "', server='" +
+            cfg_.msf_host + "', port=" + cfg_.msf_port + ")\n"
+            "try:\n"
+            "    c.sessions.session('" + sid + "').stop()\n"
+            "    print('  Session " + sid + " terminated.')\n"
+            "except Exception as e:\n"
+            "    print(f'  [ERROR] {e}')\n";
+
+        std::ofstream tmp("/tmp/_autopwn_kill.py");
+        tmp << script;
+        tmp.close();
+        exec_stream("python3 /tmp/_autopwn_kill.py");
+        fs::remove("/tmp/_autopwn_kill.py");
+    }
+
+private:
+    const Config& cfg_;
+
+    static std::string escape_quotes(const std::string& s) {
         std::string out;
         for (char c : s) {
-            out += (std::isalnum(c) || c == '.') ? c : '_';
+            if (c == '"')  out += "\\\"";
+            else if (c == '\'') out += "\\'";
+            else out += c;
         }
         return out;
     }
 };
 
-// ─────────────────────────────────────────────
-// Classe: SearchsploitRunner
-// ─────────────────────────────────────────────
-class SearchsploitRunner {
+// ═════════════════════════════════════════════════════════════════
+// DB REPORT  (chiama db_report.py)
+// ═════════════════════════════════════════════════════════════════
+class DbReport {
 public:
-    std::string xml_path;
-    std::string output_dir;
+    explicit DbReport(const Config& cfg) : cfg_(cfg) {}
 
-    SearchsploitRunner(const std::string& xml, const std::string& dir = "./results")
-        : xml_path(xml), output_dir(dir) {}
+    void show() {
+        std::cout << "\n" << Color::bold("[REPORT]") << " Reading database...\n";
+        print_divider();
 
-    // Interroga searchsploit usando il file XML di Nmap
-    std::string run() {
-        // --nmap: legge direttamente l'XML di Nmap
-        // -j: output JSON (più facile da parsare in Python)
-        std::string cmd = "searchsploit --nmap " + xml_path
-                          + " -j 2>&1";
-
-        std::cout << "[SEARCHSPLOIT] Analisi dell'XML: " << xml_path << "\n";
-        std::cout << "[SEARCHSPLOIT] Comando: " << cmd << "\n\n";
-
-        try {
-            std::string result = exec_command(cmd);
-
-            // Salva il JSON per il logic-mapper Python
-            std::string json_out = output_dir + "/searchsploit_results.json";
-            std::ofstream ofs(json_out);
-            if (ofs.is_open()) {
-                ofs << result;
-                std::cout << "[SEARCHSPLOIT] Risultati salvati in: "
-                           << json_out << "\n";
-            }
-
-            return result;
-        } catch (const std::exception& e) {
-            std::cerr << "[SEARCHSPLOIT] Eccezione: " << e.what() << "\n";
-            return "";
+        if (!fs::exists(cfg_.db_path)) {
+            std::cout << Color::yellow("  No database found at: ")
+                      << cfg_.db_path << "\n"
+                      << Color::DIM << "  Run a scan first.\n" << Color::RESET;
+            return;
         }
+        exec_stream("python3 ./db_report.py " + cfg_.db_path);
+        print_divider();
     }
+
+private:
+    const Config& cfg_;
 };
 
-// ─────────────────────────────────────────────
-// Classe: PythonBridge
-// Lancia il logic-mapper Python passando i percorsi dei file
-// ─────────────────────────────────────────────
-class PythonBridge {
+// ═════════════════════════════════════════════════════════════════
+// CONFIG WIZARD
+// ═════════════════════════════════════════════════════════════════
+class ConfigWizard {
 public:
-    std::string xml_path;
-    std::string json_path;
-    std::string script_path;
+    explicit ConfigWizard(Config& cfg) : cfg_(cfg) {}
 
-    PythonBridge(const std::string& xml,
-                 const std::string& json,
-                 const std::string& script = "./logic_mapper.py")
-        : xml_path(xml), json_path(json), script_path(script) {}
+    void run() {
+        std::cout << "\n" << Color::bold("  ── Configuration Wizard ──") << "\n";
+        std::cout << Color::DIM << "  Press Enter to keep the current value.\n\n"
+                  << Color::RESET;
 
-    bool invoke() {
-        std::string cmd = "python3 " + script_path
-                          + " --xml "  + xml_path
-                          + " --json " + json_path
-                          + " 2>&1";
+        std::cout << Color::MAGENTA << "  [Metasploit RPC]\n" << Color::RESET;
+        cfg_.msf_host     = prompt_input("  RPC host",    cfg_.msf_host);
+        cfg_.msf_port     = prompt_input("  RPC port",    cfg_.msf_port);
+        cfg_.msf_password = prompt_input("  RPC password", cfg_.msf_password);
 
-        std::cout << "\n[PYTHON-BRIDGE] Invocazione logic_mapper.py\n";
-        std::cout << "[PYTHON-BRIDGE] Comando: " << cmd << "\n\n";
+        std::cout << "\n" << Color::MAGENTA << "  [Scanner]\n" << Color::RESET;
+        cfg_.output_dir         = prompt_input("  Output directory",       cfg_.output_dir);
+        cfg_.monitor_interval   = prompt_input("  Monitor interval (sec)", cfg_.monitor_interval);
+        cfg_.post_pipeline_wait = prompt_input("  Post-pipeline wait (sec)", cfg_.post_pipeline_wait);
 
-        try {
-            std::string out = exec_command(cmd);
-            std::cout << out << "\n";
-            return true;
-        } catch (const std::exception& e) {
-            std::cerr << "[PYTHON-BRIDGE] Eccezione: " << e.what() << "\n";
-            return false;
+        std::cout << "\n" << Color::MAGENTA << "  [Database]\n" << Color::RESET;
+        cfg_.db_path = prompt_input("  Database path", cfg_.db_path);
+
+        std::cout << "\n";
+        std::string confirm = prompt_input("  Save to config.ini? [Y/n]", "y");
+        if (confirm == "y" || confirm == "Y" || confirm.empty()) {
+            cfg_.save();
+            std::cout << Color::green("  ✓ config.ini saved.\n");
+        } else {
+            std::cout << Color::yellow("  Changes discarded.\n");
         }
     }
+
+private:
+    Config& cfg_;
 };
 
-// ─────────────────────────────────────────────
-// main
-// ─────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════
+// HELP
+// ═════════════════════════════════════════════════════════════════
+void print_help(const std::string& prog) {
+    std::cout << "\n" << Color::bold("  Usage:\n");
+    std::cout << Color::DIM  << "  (interactive) " << Color::RESET
+              << Color::CYAN << prog << Color::RESET << "\n";
+    std::cout << Color::DIM  << "  (direct)      " << Color::RESET
+              << Color::CYAN << prog << " <command> [args]\n" << Color::RESET;
+
+    std::cout << "\n" << Color::bold("  Commands:\n");
+
+    auto row = [](const std::string& cmd, const std::string& desc) {
+        std::cout << "    " << Color::GREEN << std::left
+                  << std::setw(12) << cmd << Color::RESET
+                  << Color::DIM << desc << Color::RESET << "\n";
+    };
+
+    // setw richiede <iomanip>
+    row("scan <target>",  "Full pipeline: Nmap + Searchsploit + Metasploit");
+    row("nmap <target>",  "Run Nmap scan only");
+    row("report",         "Show database report");
+    row("sessions",       "List open Metasploit sessions");
+    row("config",         "Interactive configuration wizard");
+    row("help",           "Show this help message");
+    std::cout << "\n";
+}
+
+// ═════════════════════════════════════════════════════════════════
+// INTERACTIVE MENU
+// ═════════════════════════════════════════════════════════════════
+void print_menu(const Config& cfg) {
+    std::cout << Color::BOLD << Color::CYAN;
+    std::cout << "  ┌──────────────────────────────────────────┐\n";
+    std::cout << "  │              MAIN MENU                   │\n";
+    std::cout << "  ├──────────────────────────────────────────┤\n";
+    std::cout << Color::RESET;
+    auto item = [](const std::string& num, const std::string& label) {
+        std::cout << "  │  " << Color::YELLOW << num << Color::RESET
+                  << "  " << label << "\n";
+    };
+    item("1", "Run full pipeline       (scan + exploit)  ");
+    item("2", "Run Nmap only                            ");
+    item("3", "View database report                     ");
+    item("4", "Manage MSF sessions                      ");
+    item("5", "Configure settings                       ");
+    item("0", "Exit                                     ");
+    std::cout << Color::CYAN << Color::BOLD;
+    std::cout << "  └──────────────────────────────────────────┘\n";
+    std::cout << Color::RESET;
+    std::cout << Color::DIM << "  DB: " << cfg.db_path
+              << "  |  MSF: " << cfg.msf_host << ":" << cfg.msf_port
+              << "\n" << Color::RESET;
+    std::cout << "\n";
+}
+
+void sessions_submenu(SessionManager& sm) {
+    while (true) {
+        std::cout << "\n" << Color::bold("  ── Sessions ──") << "\n";
+        std::cout << "    " << Color::YELLOW << "1" << Color::RESET << "  List sessions\n";
+        std::cout << "    " << Color::YELLOW << "2" << Color::RESET << "  Kill a session\n";
+        std::cout << "    " << Color::YELLOW << "0" << Color::RESET << "  Back\n\n";
+
+        std::string ch = prompt_input("  Choice");
+        if (ch == "1") sm.list_sessions();
+        else if (ch == "2") sm.kill_session();
+        else if (ch == "0" || ch == "b" || ch == "back") break;
+        else std::cout << Color::yellow("  Unknown option.\n");
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// COMMAND DISPATCHER
+// ═════════════════════════════════════════════════════════════════
+int dispatch(const std::string& cmd,
+             const std::string& arg,
+             Config& cfg) {
+
+    NmapRunner       nmap(cfg);
+    SearchsploitRunner ss(cfg);
+    PythonBridge     bridge(cfg);
+    SessionManager   sessions(cfg);
+    DbReport         report(cfg);
+    ConfigWizard     wizard(cfg);
+
+    if (cmd == "scan") {
+        if (arg.empty()) {
+            std::cerr << Color::red("  [ERROR] scan requires a target.\n");
+            return 1;
+        }
+        std::string xml = nmap.run(arg);
+        if (xml.empty()) return 2;
+        std::string json = ss.run(xml);
+        bridge.invoke(xml, json);
+        return 0;
+    }
+
+    if (cmd == "nmap") {
+        if (arg.empty()) {
+            std::cerr << Color::red("  [ERROR] nmap requires a target.\n");
+            return 1;
+        }
+        nmap.run(arg);
+        return 0;
+    }
+
+    if (cmd == "report") {
+        report.show();
+        return 0;
+    }
+
+    if (cmd == "sessions") {
+        sessions.list_sessions();
+        return 0;
+    }
+
+    if (cmd == "config") {
+        wizard.run();
+        return 0;
+    }
+
+    std::cerr << Color::red("  [ERROR] Unknown command: " + cmd + "\n");
+    return 1;
+}
+
+// ═════════════════════════════════════════════════════════════════
+// INTERACTIVE LOOP
+// ═════════════════════════════════════════════════════════════════
+void interactive_loop(Config& cfg) {
+    NmapRunner       nmap(cfg);
+    SearchsploitRunner ss(cfg);
+    PythonBridge     bridge(cfg);
+    SessionManager   sessions(cfg);
+    DbReport         report(cfg);
+    ConfigWizard     wizard(cfg);
+
+    while (true) {
+        print_menu(cfg);
+        std::string choice = prompt_input("  Select option");
+
+        if (choice == "1") {
+            // Full pipeline
+            std::string target = prompt_input("  Target IP or CIDR");
+            if (target.empty()) { std::cout << Color::yellow("  Cancelled.\n"); continue; }
+
+            std::string xml = nmap.run(target);
+            if (xml.empty()) continue;
+            std::string json = ss.run(xml);
+            bridge.invoke(xml, json);
+
+        } else if (choice == "2") {
+            // Only Nmap
+            std::string target = prompt_input("  Target IP or CIDR");
+            if (target.empty()) { std::cout << Color::yellow("  Cancelled.\n"); continue; }
+            nmap.run(target);
+
+        } else if (choice == "3") {
+            report.show();
+
+        } else if (choice == "4") {
+            sessions_submenu(sessions);
+
+        } else if (choice == "5") {
+            wizard.run();
+            // Ricarica config dal file aggiornato
+            cfg.load(cfg.config_path);
+
+        } else if (choice == "0" || choice == "exit" || choice == "quit") {
+            std::cout << "\n" << Color::cyan("  Goodbye.\n\n");
+            break;
+
+        } else {
+            std::cout << Color::yellow("  Unknown option. Try 0-5.\n");
+        }
+
+        std::cout << "\n";
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════
+// MAIN
+// ═════════════════════════════════════════════════════════════════
+#include <iomanip>   // std::setw (usato in print_help)
+
 int main(int argc, char* argv[]) {
-    std::cout << "==============================================\n";
-    std::cout << "   Security Scanner Runner (C++) - Esame Lab\n";
-    std::cout << "==============================================\n\n";
+    // Carica configurazione
+    Config cfg;
+    cfg.load("config.ini");
 
-    if (argc < 2) {
-        std::cerr << "Uso: " << argv[0] << " <target_ip_o_range>\n";
-        std::cerr << "Es:  " << argv[0] << " 192.168.1.1\n";
-        std::cerr << "Es:  " << argv[0] << " 192.168.1.0/24\n";
-        return 1;
+    print_banner();
+
+    // ── MODALITÀ DIRETTA ─────────────────────────────────────────
+    if (argc >= 2) {
+        std::string cmd = argv[1];
+        std::string arg = (argc >= 3) ? argv[2] : "";
+
+        // Normalizza a lowercase
+        std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+
+        if (cmd == "help" || cmd == "--help" || cmd == "-h") {
+            print_help(argv[0]);
+            return 0;
+        }
+
+        std::cout << Color::DIM << "  [" << timestamp() << "] "
+                  << "Direct mode → " << cmd;
+        if (!arg.empty()) std::cout << " " << arg;
+        std::cout << "\n" << Color::RESET;
+
+        return dispatch(cmd, arg, cfg);
     }
 
-    std::string target    = argv[1];
-    std::string result_dir = "./results";
-
-    // ── Fase 1: Nmap ──────────────────────────
-    NmapRunner nmap(target, result_dir);
-    if (!nmap.run()) {
-        std::cerr << "[MAIN] Scansione Nmap fallita. Interruzione.\n";
-        return 2;
-    }
-
-    // ── Fase 2: Searchsploit ──────────────────
-    SearchsploitRunner ss(nmap.get_xml_path(), result_dir);
-    ss.run();  // anche se vuoto, Python gestirà il caso
-
-    // ── Fase 3: Invoca il logic-mapper Python ─
-    std::string json_path = result_dir + "/searchsploit_results.json";
-    PythonBridge bridge(nmap.get_xml_path(), json_path);
-    bridge.invoke();
-
-    std::cout << "\n[MAIN] Pipeline completata.\n";
+    // ── MODALITÀ INTERATTIVA ─────────────────────────────────────
+    interactive_loop(cfg);
     return 0;
 }
