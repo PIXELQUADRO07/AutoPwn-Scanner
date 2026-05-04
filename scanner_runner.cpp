@@ -1,4 +1,4 @@
-k/**
+/**
  * scanner_runner.cpp
  * ─────────────────────────────────────────────────────────────────
  * AutoPwn Scanner — CLI integrata in C++
