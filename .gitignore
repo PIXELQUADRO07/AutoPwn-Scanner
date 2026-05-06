@@ -1,12 +1,10 @@
-# ── Configurazione sensibile ──────────────────────────────────
-# MAI committare config.ini: contiene la password di msfrpcd
+
 config.ini
 
-# ── Risultati a runtime ───────────────────────────────────────
-# Scansioni, database e output: sono dati di lab, non codice
+
 results/
 
-# ── Binario C++ compilato ────────────────────────────────────
+
 scanner_runner
 scanner_runner.exe
 
@@ -50,14 +48,13 @@ CMakeCache.txt
 cmake_install.cmake
 Makefile.in
 
-# ── Log e file temporanei ─────────────────────────────────────
+
 *.log
 *.tmp
 *.bak
 *.orig
 
-# ── File sensibili generici ───────────────────────────────────
-# Chiavi, certificati, credenziali
+
 *.pem
 *.key
 *.crt

@@ -184,6 +184,19 @@ The C++ runner executes in sequence:
 2. `searchsploit --nmap results/scan_<IP>.xml -j → results/searchsploit_results.json`
 3. `python3 logic_mapper.py --xml ... --json ...`
 
+In interactive mode, use `clear` or `cls` to reset the terminal screen.
+
+### Interactive CLI commands
+
+Within `./scanner_runner` interactive mode you can also use:
+
+- `searchsploit <xml_or_target>` — run Searchsploit against an existing Nmap XML file or named target.
+- `exploit list [query]` — list Metasploit exploit modules from `msfconsole`.
+- `exploit show [module]` — show details for the selected exploit or a specified module.
+- `exploit select <module>` — choose a module for later execution.
+- `exploit run <target> [rport] [module]` — execute the selected or specified exploit module.
+- `msf list [query]` — alias for `exploit list`.
+
 ### Step 3 — View results
 
 ```bash
