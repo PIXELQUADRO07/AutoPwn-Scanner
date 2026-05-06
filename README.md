@@ -1,3 +1,4 @@
+<img width="1181" height="857" alt="Screenshot_20260506_215458" src="https://github.com/user-attachments/assets/93d82d4d-0cf9-435b-ba1f-dcc66d9bb72f" />
 # 🔍 AutoPwn Scanner
 
 > Automated vulnerability scanning and exploitation pipeline for authorized lab environments.  
