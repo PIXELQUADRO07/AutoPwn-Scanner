@@ -8,9 +8,9 @@
 
 [metasploit]
 # Password set at msfrpcd startup (-P <password>)
-password = CHANGE_THIS_PASSWORD
-host     = 127.0.0.1
-port     = 55553
+msf_password = CHANGE_THIS_PASSWORD
+msf_host     = 127.0.0.1
+msf_port     = 55553
 
 [scanner]
 # Directory where to save XML, JSON and database
@@ -24,4 +24,4 @@ monitor_interval = 5
 post_pipeline_wait = 10
 
 [database]
-path = ./results/scanner.db
+db_path = ./results/scanner.db

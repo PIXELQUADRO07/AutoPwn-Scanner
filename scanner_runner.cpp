@@ -46,15 +46,6 @@
  * ═══════════════════════════════════════════════════════════════
  */
 
-// ── Readline detection ───────────────────────────────────────────
-#if __has_include(<readline/readline.h>)
-  #include <readline/readline.h>
-  #include <readline/history.h>
-  #define HAS_READLINE 1
-#else
-  #define HAS_READLINE 0
-#endif
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -77,6 +68,18 @@
 #include <string>
 #include <thread>
 #include <vector>
+// POSIX — fork / execvp / waitpid / pipe
+#include <unistd.h>
+#include <sys/wait.h>
+
+// ── Readline detection ───────────────────────────────────────────
+#if __has_include(<readline/readline.h>)
+  #include <readline/readline.h>
+  #include <readline/history.h>
+  #define HAS_READLINE 1
+#else
+  #define HAS_READLINE 0
+#endif
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
@@ -220,28 +223,92 @@ static bool valid_ip(const std::string& s) {
     return std::regex_match(s, ipv4) || std::regex_match(s, host);
 }
 
-// ── exec helpers ─────────────────────────────────────────────────
-static int exec_stream(const std::string& cmd, int timeout_sec = 0) {
-    std::string full = (timeout_sec > 0)
-        ? "timeout " + std::to_string(timeout_sec) + " " + cmd
-        : cmd;
-    FILE* p = popen(full.c_str(), "r");
-    if (!p) return -1;
+// ── exec helpers — usa fork+execve per evitare shell injection ────
+//
+// exec_argv: lancia un programma con argv esplicito (NO shell).
+//   args[0] = path eseguibile, args[1..] = argomenti.
+//   Se timeout_sec > 0 viene prepeso "timeout <sec>" via execve.
+//   Restituisce exit code; stdout viene letto e stampato in streaming.
+//
+static int exec_argv(std::vector<std::string> args,
+                     int timeout_sec = 0,
+                     std::string* capture = nullptr) {
+    // Prependi timeout se richiesto
+    if (timeout_sec > 0) {
+        args.insert(args.begin(), std::to_string(timeout_sec));
+        args.insert(args.begin(), "timeout");
+    }
+
+    // Costruisci array di puntatori const char* per execvp
+    std::vector<const char*> argv_ptrs;
+    argv_ptrs.reserve(args.size() + 1);
+    for (auto& a : args) argv_ptrs.push_back(a.c_str());
+    argv_ptrs.push_back(nullptr);
+
+    // Pipe per leggere stdout del figlio
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
+
+    if (pid == 0) {
+        // Child: redirect stdout sul write-end della pipe
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        // execvp cerca il programma nel PATH
+        execvp(argv_ptrs[0],
+               const_cast<char* const*>(argv_ptrs.data()));
+        _exit(127);  // execvp fallito
+    }
+
+    // Parent: leggi dallo read-end
+    close(pipefd[1]);
     char buf[512];
-    while (!g_interrupted && fgets(buf, sizeof(buf), p))
-        std::cout << buf, std::cout.flush();
-    return pclose(p);
+    ssize_t n;
+    while (!g_interrupted &&
+           (n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+        buf[n] = '\0';
+        if (capture) *capture += buf;
+        else { std::cout << buf; std::cout.flush(); }
+    }
+    close(pipefd[0]);
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static std::string exec_capture(const std::string& cmd, int timeout_sec = 0) {
-    std::string full = (timeout_sec > 0)
-        ? "timeout " + std::to_string(timeout_sec) + " " + cmd
-        : cmd;
-    std::string r; FILE* p = popen(full.c_str(), "r");
-    if (!p) return r;
-    char buf[512];
-    while (fgets(buf, sizeof(buf), p)) r += buf;
-    pclose(p); return r;
+// Wrapper compatibile con il codice esistente (stringa → tokenizza → execve)
+// Usato solo per comandi interni senza input utente.
+static int exec_stream(const std::string& cmd, int timeout_sec = 0) {
+    auto tok = tokenize(cmd);
+    if (tok.empty()) return -1;
+    return exec_argv(tok, timeout_sec);
+}
+
+static std::string exec_capture(const std::string& cmd,
+                                 int timeout_sec = 0) {
+    auto tok = tokenize(cmd);
+    if (tok.empty()) return "";
+    std::string out;
+    exec_argv(tok, timeout_sec, &out);
+    return out;
+}
+
+// Versione sicura con argv esplicito (usata da NmapRunner e SearchsploitRunner)
+static int exec_stream_safe(std::vector<std::string> args,
+                             int timeout_sec = 0) {
+    return exec_argv(std::move(args), timeout_sec);
+}
+
+static std::string exec_capture_safe(std::vector<std::string> args,
+                                      int timeout_sec = 0) {
+    std::string out;
+    exec_argv(std::move(args), timeout_sec, &out);
+    return out;
 }
 
 static void write_tmp(const std::string& path, const std::string& s) {
@@ -618,7 +685,7 @@ static void print_banner(const Config& cfg) {
 //  AUTOCOMPLETION
 // ════════════════════════════════════════════════════════════════
 static const std::vector<std::string> COMMANDS = {
-    "scan","nmap","ping","whois","sessions","kill",
+    "scan","nmap","ping","whois","sessions","kill","cleanup",
     "report","export","set","show","workspace","history",
     "status","banner","config","help","version","exit","quit"
 };
@@ -731,9 +798,10 @@ public:
         });
 
         if (!g_quiet) std::cout << "\n";
-        int rc = exec_stream("nmap -sV --script=vulners -oX "
-                             + xml + " " + target + " 2>&1",
-                             std::stoi(cfg.timeout_nmap));
+        // Argv esplicito — nessuna interpolazione shell
+        int rc = exec_stream_safe(
+            {"nmap", "-sV", "--script=vulners", "-oX", xml, target},
+            std::stoi(cfg.timeout_nmap));
         done = true;
         if (ticker.joinable()) ticker.join();
         pb.stop(rc == 0 && fs::exists(xml));
@@ -775,8 +843,10 @@ public:
         auto t0 = Clock::now();
         ProgressBar pb("Querying exploitdb", 34);
         pb.start();
-        std::string out = exec_capture("searchsploit --nmap " + xml + " -j 2>&1",
-                                       std::stoi(cfg.timeout_searchsploit));
+        // Argv esplicito — nessuna shell injection possibile
+        std::string out = exec_capture_safe(
+            {"searchsploit", "--nmap", xml, "-j"},
+            std::stoi(cfg.timeout_searchsploit));
         pb.stop(!out.empty());
 
         std::ofstream f(json); f << out;
@@ -1257,6 +1327,7 @@ static void print_help() {
     std::cout << "\n  " << Color::B << Color::BCYN << "Sessions\n" << Color::R;
     row("sessions",  "",                    "List active MSF sessions");
     row("kill",      "<id>",               "Terminate a session");
+    row("cleanup",   "",                   "Kill ALL open MSF sessions");
     std::cout << "\n  " << Color::B << Color::BCYN << "Data\n" << Color::R;
     row("report",    "",                   "Show SQLite report");
     row("export",    "csv|html",           "Export results to file");
@@ -1294,7 +1365,7 @@ static void print_version() {
     t.add_row({"Standard",   "C++17"});
     t.add_row({"Readline",   HAS_READLINE ? "enabled (history+tab)" : "disabled"});
     t.add_row({"SIGINT",     "handled (Ctrl+C returns to prompt)"});
-    t.add_row({"Features",   "banner|set|show|workspace|ping|whois|export|history|status"});
+    t.add_row({"Features",   "execve(no shell injection)|cleanup|CVE corr.|ranking|payload select"});
     t.print();
     section_end();
 }
@@ -1349,6 +1420,33 @@ static int dispatch(const std::vector<std::string>& tok,
     }
     if (cmd == "sessions")  { sm.list();              return 0; }
     if (cmd == "kill")      { sm.kill(a1);            return 0; }
+    if (cmd == "cleanup") {
+        // Chiude tutte le sessioni MSF aperte tramite Python
+        section("CLEANUP SESSIONS", Color::BRED);
+        std::string script =
+            "try:\n"
+            "    from pymetasploit3.msfrpc import MsfRpcClient\n"
+            "    c = MsfRpcClient('" + cfg.msf_password + "',"
+            " server='" + cfg.msf_host + "', port=" + cfg.msf_port + ")\n"
+            "    sessions = c.sessions.list\n"
+            "    if not sessions:\n"
+            "        print('[*] No sessions to clean up.')\n"
+            "    else:\n"
+            "        for sid in list(sessions.keys()):\n"
+            "            try:\n"
+            "                c.sessions.session(str(sid)).stop()\n"
+            "                print(f'[+] Closed session {sid}')\n"
+            "            except Exception as e:\n"
+            "                print(f'[-] {sid}: {e}')\n"
+            "        print('[+] Cleanup complete.')\n"
+            "except Exception as e:\n"
+            "    print(f'[-] {e}')\n";
+        write_tmp("/tmp/_ap_cleanup.py", script);
+        exec_stream("python3 /tmp/_ap_cleanup.py");
+        fs::remove("/tmp/_ap_cleanup.py");
+        log.log("[*] cleanup sessions");
+        return 0;
+    }
     if (cmd == "report")    { dr.show();              return 0; }
     if (cmd == "export")    { cmd_export(tok,cfg,log);return 0; }
     if (cmd == "set")       { cmd_set(tok,cfg,log);   return 0; }
