@@ -144,17 +144,31 @@ HTTP_PATH_PATTERNS = [
 class Database:
     def __init__(self, db_path: str = DB_PATH):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        # WAL: permette letture e scritture concorrenti senza deadlock
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self._db_path = db_path
         self._lock = threading.Lock()
+        self._local = threading.local()
+        self._initialize_main_connection()
         self._create_tables()
         info(f"DB connected: {db_path}  [WAL mode]")
 
+    def _initialize_main_connection(self):
+        conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        self._local.conn = conn
+
+    def _conn(self):
+        if not hasattr(self._local, 'conn'):
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            self._local.conn = conn
+        return self._local.conn
+
     def _create_tables(self):
         with self._lock:
-            self.conn.executescript("""
+            conn = self._conn()
+            conn.executescript("""
                 CREATE TABLE IF NOT EXISTS Targets (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     ip          TEXT NOT NULL,
@@ -204,7 +218,7 @@ class Database:
                     attempt_time TEXT NOT NULL
                 );
             """)
-            self.conn.commit()
+            conn.commit()
 
     def _now(self) -> str:
         return datetime.now().isoformat()
@@ -212,12 +226,13 @@ class Database:
     def insert_target(self, ip: str, hostname: str = "",
                       os_info: str = "", arch: str = "") -> int:
         with self._lock:
-            cur = self.conn.cursor()
+            conn = self._conn()
+            cur = conn.cursor()
             cur.execute(
                 "INSERT INTO Targets (ip,hostname,os_info,arch,scan_time) "
                 "VALUES (?,?,?,?,?)",
                 (ip, hostname, os_info, arch, self._now()))
-            self.conn.commit()
+            conn.commit()
             return cur.lastrowid
 
     def insert_vulnerability(self, target_id: int, port: int,
@@ -226,7 +241,8 @@ class Database:
                               exploit_path: str, msf_module: str,
                               msf_rank: str, has_msf: bool) -> int:
         with self._lock:
-            cur = self.conn.cursor()
+            conn = self._conn()
+            cur = conn.cursor()
             cur.execute(
                 "INSERT INTO Vulnerabilities "
                 "(target_id,port,protocol,service,version,cve_ids,"
@@ -236,19 +252,20 @@ class Database:
                 (target_id, port, protocol, service, version, cve_ids,
                  exploit_name, exploit_path, msf_module, msf_rank,
                  int(has_msf), self._now()))
-            self.conn.commit()
+            conn.commit()
             return cur.lastrowid
 
     def insert_credential(self, target_id: int, port: int,
                           service: str, username: str, password: str) -> int:
         with self._lock:
-            cur = self.conn.cursor()
+            conn = self._conn()
+            cur = conn.cursor()
             cur.execute(
                 "INSERT INTO Credentials "
                 "(target_id,port,service,username,password,found_time) "
                 "VALUES (?,?,?,?,?,?)",
                 (target_id, port, service, username, password, self._now()))
-            self.conn.commit()
+            conn.commit()
             return cur.lastrowid
 
     def insert_exploit_attempt(self, vuln_id: Optional[int],
@@ -257,7 +274,8 @@ class Database:
                                 session_user: str, success: bool,
                                 error_msg: str = "") -> int:
         with self._lock:
-            cur = self.conn.cursor()
+            conn = self._conn()
+            cur = conn.cursor()
             cur.execute(
                 "INSERT INTO Exploits_Found "
                 "(vuln_id,msf_module,rhost,rport,payload_used,"
@@ -266,13 +284,14 @@ class Database:
                 (vuln_id, msf_module, rhost, rport, payload_used,
                  session_id, session_user, int(success), error_msg,
                  self._now()))
-            self.conn.commit()
+            conn.commit()
             return cur.lastrowid
 
     def get_credentials(self, target_id: int, port: int) -> list[dict]:
         """Restituisce le credenziali trovate per un target/porta."""
         with self._lock:
-            cur = self.conn.cursor()
+            conn = self._conn()
+            cur = conn.cursor()
             cur.execute(
                 "SELECT username, password FROM Credentials "
                 "WHERE target_id=? AND port=?",
@@ -281,7 +300,9 @@ class Database:
                     for r in cur.fetchall()]
 
     def close(self):
-        self.conn.close()
+        if hasattr(self._local, 'conn'):
+            self._local.conn.close()
+            del self._local.conn
 
 
 # ════════════════════════════════════════════════════════════════
@@ -880,7 +901,8 @@ class MeterpreterMonitor:
         stype   = info_d.get("type", "unknown")
         user    = info_d.get("username", "")
         try:
-            cur = self.db.conn.cursor()
+            conn = self.db._conn()
+            cur = conn.cursor()
             cur.execute(
                 "SELECT id FROM Exploits_Found "
                 "WHERE rhost=? AND session_id IS NULL "
@@ -888,12 +910,12 @@ class MeterpreterMonitor:
             row = cur.fetchone()
             if row:
                 with self.db._lock:
-                    self.db.conn.execute(
+                    conn.execute(
                         "UPDATE Exploits_Found "
                         "SET session_id=?,session_user=?,success=1,"
                         "attempt_time=? WHERE id=?",
                         (int(sid), user, datetime.now().isoformat(), row[0]))
-                    self.db.conn.commit()
+                    conn.commit()
             else:
                 self.db.insert_exploit_attempt(
                     None, via_mod or f"[monitor/{stype}]",
@@ -920,7 +942,8 @@ class MarkdownReporter:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
 
         with self.db._lock:
-            cur = self.db.conn.cursor()
+            conn = self.db._conn()
+            cur = conn.cursor()
 
             # Targets
             cur.execute("SELECT * FROM Targets ORDER BY scan_time")

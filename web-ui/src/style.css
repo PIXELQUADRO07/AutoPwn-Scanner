@@ -1,0 +1,163 @@
+:root {
+  color-scheme: dark;
+  color: #ffe2e7;
+  background: #060103;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  min-height: 100vh;
+  padding: 2rem;
+  background: radial-gradient(circle at top left, rgba(255, 50, 90, 0.18), transparent 28%),
+              radial-gradient(circle at bottom right, rgba(180, 10, 35, 0.2), transparent 24%),
+              linear-gradient(180deg, #0a0305 0%, #120308 100%);
+}
+#app {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+header {
+  margin-bottom: 1.5rem;
+}
+header h1 {
+  margin: 0 0 0.5rem;
+  font-size: clamp(2rem, 2.5vw, 3rem);
+  letter-spacing: -0.04em;
+  color: #ff5a7f;
+}
+header p {
+  margin: 0;
+  color: #ffa6b7;
+}
+.card {
+  background: rgba(15, 4, 7, 0.96);
+  border: 1px solid rgba(255, 46, 85, 0.24);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px rgba(255, 40, 90, 0.14);
+  padding: 1.6rem;
+  margin-bottom: 1.25rem;
+}
+.terminal-card {
+  padding: 1.6rem;
+}
+.banner {
+  margin: 0 0 1rem;
+  padding: 1rem;
+  background: rgba(12, 3, 6, 0.95);
+  border: 1px solid rgba(255, 52, 96, 0.45);
+  border-radius: 14px;
+  color: #ff84a9;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  line-height: 1.1;
+  white-space: pre-wrap;
+}
+.terminal-controls {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.terminal-controls input[type="text"] {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 61, 99, 0.22);
+  background: rgba(20, 6, 10, 0.98);
+  color: #ffe2e7;
+}
+.terminal-controls button {
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #ff3d63, #90000f);
+  color: white;
+  padding: 0.9rem 1.25rem;
+  cursor: pointer;
+  box-shadow: 0 10px 28px rgba(255, 41, 85, 0.28);
+}
+.terminal-controls button:hover {
+  transform: translateY(-1px);
+}
+.terminal-controls button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.shell-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: #ff9bb7;
+  font-size: 0.95rem;
+}
+.terminal-output {
+  min-height: 180px;
+  background: rgba(8, 2, 4, 0.98);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 56, 103, 0.32);
+  padding: 1rem;
+  overflow-y: auto;
+  max-height: 320px;
+  color: #ffb9c8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+.terminal-output div {
+  white-space: pre-wrap;
+  margin: 0.35rem 0;
+}
+.inputs {
+  display: grid;
+  gap: 1rem;
+}
+.file-control {
+  display: grid;
+  gap: 0.5rem;
+}
+.file-control span {
+  font-size: 0.95rem;
+  color: #ff9bb7;
+}
+.file-control input {
+  width: 100%;
+  color: #ffe2e7;
+}
+.hint {
+  margin: 1rem 0 0;
+  color: #ff7b99;
+  font-size: 0.95rem;
+}
+.summary-grid {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+.hidden {
+  display: none;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+th,
+td {
+  border: 1px solid rgba(255, 71, 109, 0.18);
+  padding: 0.75rem 0.85rem;
+  text-align: left;
+}
+th {
+  background: rgba(130, 12, 28, 0.15);
+  color: #ffb3c7;
+}
+tr:nth-child(even) {
+  background: rgba(255, 41, 79, 0.08);
+}
+footer {
+  margin-top: 1.5rem;
+  color: #ff6a88;
+}
+.error {
+  color: #ff3f60;
+}

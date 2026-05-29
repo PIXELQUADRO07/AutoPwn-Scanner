@@ -69,6 +69,9 @@
 #include <thread>
 #include <vector>
 // POSIX — fork / execvp / waitpid / pipe
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -96,12 +99,15 @@ static constexpr const char* BUILD_DATE = __DATE__;
 // ════════════════════════════════════════════════════════════════
 static bool g_quiet  = false;  // --quiet: sopprime output verboso
 static std::atomic<bool> g_interrupted{false};  // SIGINT handler
+static std::atomic<pid_t> g_current_child{0};
 
 // ════════════════════════════════════════════════════════════════
 //  SIGINT HANDLER  — Ctrl+C torna al prompt senza crashare
 // ════════════════════════════════════════════════════════════════
 static void sigint_handler(int) {
     g_interrupted = true;
+    pid_t child = g_current_child.load();
+    if (child > 0) killpg(child, SIGINT);
     // Newline per non lasciare il cursore su ^C
     write(STDOUT_FILENO, "\n", 1);
 }
@@ -196,88 +202,214 @@ static std::string trim(const std::string& s) {
 
 static std::string sanitize(const std::string& s) {
     std::string o;
-    for (char c : s)
-        o += (std::isalnum(static_cast<unsigned char>(c)) || c == '.') ? c : '_';
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '.' || c == '-' || c == '_')
+            o += c;
+        else if (c == ':')
+            o += '_';
+        else
+            o += '_';
+    }
     return o;
 }
 
 static std::vector<std::string> tokenize(const std::string& line) {
     std::vector<std::string> tok;
-    std::string cur; bool q = false;
-    for (char c : line) {
-        if (c == '"') { q = !q; continue; }
-        if (c == ' ' && !q) { if (!cur.empty()) { tok.push_back(cur); cur.clear(); } }
-        else cur += c;
+    std::string cur;
+    bool in_double = false;
+    bool in_single = false;
+    bool escaping = false;
+
+    for (char ch : line) {
+        if (escaping) {
+            cur += ch;
+            escaping = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaping = true;
+            continue;
+        }
+        if (ch == '"' && !in_single) {
+            in_double = !in_double;
+            continue;
+        }
+        if (ch == '\'' && !in_double) {
+            in_single = !in_single;
+            continue;
+        }
+        if (!in_double && !in_single && std::isspace(static_cast<unsigned char>(ch))) {
+            if (!cur.empty()) {
+                tok.push_back(cur);
+                cur.clear();
+            }
+            continue;
+        }
+        cur += ch;
     }
     if (!cur.empty()) tok.push_back(cur);
     return tok;
 }
 
 // ── Validazione IP / CIDR ────────────────────────────────────────
-static bool valid_ip(const std::string& s) {
-    // IPv4, IPv4/CIDR, hostname semplice
-    static const std::regex ipv4(
-        R"(^(\d{1,3}\.){3}\d{1,3}(/\d{1,2})?$)");
-    static const std::regex host(
-        R"(^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})*$)");
-    return std::regex_match(s, ipv4) || std::regex_match(s, host);
+static bool is_valid_ipv4(const std::string& s) {
+    struct in_addr addr;
+    return inet_pton(AF_INET, s.c_str(), &addr) == 1;
 }
+
+static bool is_valid_ipv6(const std::string& s) {
+    struct in6_addr addr6;
+    return inet_pton(AF_INET6, s.c_str(), &addr6) == 1;
+}
+
+static bool valid_cidr(const std::string& s) {
+    auto pos = s.find('/');
+    if (pos == std::string::npos) return false;
+    std::string addr = s.substr(0, pos);
+    std::string mask = s.substr(pos + 1);
+    if (mask.empty() || mask.size() > 3) return false;
+    for (char c : mask)
+        if (!std::isdigit(static_cast<unsigned char>(c)))
+            return false;
+    int mm = std::stoi(mask);
+    if (is_valid_ipv4(addr)) return mm >= 0 && mm <= 32;
+    if (is_valid_ipv6(addr)) return mm >= 0 && mm <= 128;
+    return false;
+}
+
+static bool valid_hostname(const std::string& s) {
+    if (s.empty() || s.size() > 255) return false;
+    static const std::regex host(
+        R"(^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?)*$)"
+    );
+    return std::regex_match(s, host);
+}
+
+static bool valid_ip(const std::string& s) {
+    if (s.empty()) return false;
+    if (is_valid_ipv4(s) || is_valid_ipv6(s)) return true;
+    if (s.find('/') != std::string::npos) return valid_cidr(s);
+    return valid_hostname(s);
+}
+
 
 // ── exec helpers — usa fork+execve per evitare shell injection ────
 //
 // exec_argv: lancia un programma con argv esplicito (NO shell).
 //   args[0] = path eseguibile, args[1..] = argomenti.
-//   Se timeout_sec > 0 viene prepeso "timeout <sec>" via execve.
+//   Se timeout_sec > 0 la funzione supervisiona il processo e chiude il gruppo sul timeout.
 //   Restituisce exit code; stdout viene letto e stampato in streaming.
 //
+static std::string resolve_executable(const std::string& name) {
+    if (name.empty()) return name;
+    if (name.find('/') != std::string::npos) {
+        return name;
+    }
+    static const std::vector<std::string> search_paths = {
+        "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin",
+        "/sbin", "/snap/bin"
+    };
+    for (auto& dir : search_paths) {
+        std::string candidate = dir + "/" + name;
+        if (fs::exists(candidate) && fs::is_regular_file(candidate))
+            return candidate;
+    }
+    return name; // fallback to PATH if not found in known locations
+}
+
 static int exec_argv(std::vector<std::string> args,
                      int timeout_sec = 0,
                      std::string* capture = nullptr) {
-    // Prependi timeout se richiesto
-    if (timeout_sec > 0) {
-        args.insert(args.begin(), std::to_string(timeout_sec));
-        args.insert(args.begin(), "timeout");
-    }
+    if (args.empty()) return -1;
+    args[0] = resolve_executable(args[0]);
 
-    // Costruisci array di puntatori const char* per execvp
     std::vector<const char*> argv_ptrs;
     argv_ptrs.reserve(args.size() + 1);
     for (auto& a : args) argv_ptrs.push_back(a.c_str());
     argv_ptrs.push_back(nullptr);
 
-    // Pipe per leggere stdout del figlio
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
     pid_t pid = fork();
-    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return -1;
+    }
 
     if (pid == 0) {
-        // Child: redirect stdout sul write-end della pipe
+        if (setsid() < 0) _exit(127);
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        // execvp cerca il programma nel PATH
-        execvp(argv_ptrs[0],
-               const_cast<char* const*>(argv_ptrs.data()));
-        _exit(127);  // execvp fallito
+        execv(argv_ptrs[0], const_cast<char* const*>(argv_ptrs.data()));
+        _exit(127);
     }
 
-    // Parent: leggi dallo read-end
     close(pipefd[1]);
-    char buf[512];
-    ssize_t n;
-    while (!g_interrupted &&
-           (n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
+    g_current_child = pid;
+
+    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+    int status = 0;
+    bool timed_out = false;
+    bool finished = false;
+    auto deadline = (timeout_sec > 0)
+                    ? Clock::now() + std::chrono::seconds(timeout_sec)
+                    : Clock::time_point::max();
+
+    struct pollfd pfd{pipefd[0], POLLIN, 0};
+
+    while (!finished) {
+        if (g_interrupted) {
+            killpg(pid, SIGINT);
+        }
+
+        int poll_ret = poll(&pfd, 1, 100);
+        if (poll_ret > 0 && (pfd.revents & POLLIN)) {
+            char buf[512];
+            ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+            if (n > 0) {
+                buf[n] = '\0';
+                if (capture) *capture += buf;
+                else { std::cout << buf; std::cout.flush(); }
+            }
+        }
+
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            finished = true;
+            continue;
+        }
+
+        if (timeout_sec > 0 && Clock::now() >= deadline) {
+            timed_out = true;
+            killpg(pid, SIGKILL);
+            break;
+        }
+
+        if (poll_ret < 0 && errno != EINTR && errno != EAGAIN) {
+            break;
+        }
+    }
+
+    // Read any remaining data after child exits
+    while (true) {
+        char buf[512];
+        ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
+        if (n <= 0) break;
         buf[n] = '\0';
         if (capture) *capture += buf;
         else { std::cout << buf; std::cout.flush(); }
     }
-    close(pipefd[0]);
 
-    int status = 0;
-    waitpid(pid, &status, 0);
+    close(pipefd[0]);
+    if (!finished)
+        waitpid(pid, &status, 0);
+    g_current_child = 0;
+
+    if (timed_out)
+        return 124;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
@@ -579,8 +711,9 @@ public:
         while (std::getline(f, line)) {
             line = trim(line);
             if (line.empty() || line[0] == '#') continue;
-            if (line.front() == '[' && line.back() == ']') {
-                sec = line.substr(1, line.size() - 2); continue;
+            if (line.size() >= 2 && line.front() == '[' && line.back() == ']') {
+                sec = line.substr(1, line.size() - 2);
+                continue;
             }
             auto eq = line.find('='); if (eq == std::string::npos) continue;
             std::string k = trim(line.substr(0, eq));
@@ -761,7 +894,7 @@ static void print_severity_line(const std::string& line) {
     else
         std::cout << Color::DIM << "  " << line << Color::R;
 
-    if (line.back() != '\n') std::cout << "\n";
+    if (!line.empty() && line.back() != '\n') std::cout << "\n";
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -885,11 +1018,11 @@ public:
 
         auto t0 = Clock::now();
         log.log_cmd("logic_mapper " + xml);
-        int rc = exec_stream(
-            "python3 ./logic_mapper.py"
-            " --xml "  + xml +
-            " --json " + json +
-            " --monitor-interval " + cfg.monitor_interval + " 2>&1",
+        int rc = exec_argv(
+            {"python3", "./logic_mapper.py",
+             "--xml", xml,
+             "--json", json,
+             "--monitor-interval", cfg.monitor_interval},
             std::stoi(cfg.timeout_msf));
         double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
         print_elapsed(elapsed);
@@ -917,7 +1050,7 @@ static void cmd_ping(const std::string& target, Logger& log) {
     divider();
 
     auto t0 = Clock::now();
-    int rc = exec_stream("ping -c 4 -W 2 " + target + " 2>&1");
+    int rc = exec_argv({"ping", "-c", "4", "-W", "2", target});
     double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
     print_elapsed(elapsed);
     divider();
@@ -938,7 +1071,7 @@ static void cmd_whois(const std::string& target, Logger& log) {
     divider();
 
     auto t0 = Clock::now();
-    int rc = exec_stream("whois " + target + " 2>&1", 30);
+    int rc = exec_argv({"whois", target}, 30);
     double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
     print_elapsed(elapsed);
     divider();
@@ -968,26 +1101,31 @@ static void cmd_export(const std::vector<std::string>& tok,
 
     if (fmt == "csv") {
         // Usa sqlite3 per dump CSV
-        std::string cmd =
-            "sqlite3 -separator ',' " + cfg.db_path +
-            " 'SELECT t.ip,t.hostname,v.port,v.service,v.version,"
+        std::string query =
+            "SELECT t.ip,t.hostname,v.port,v.service,v.version,"
             "v.exploit_name,v.has_msf,e.success "
             "FROM Vulnerabilities v "
             "LEFT JOIN Targets t ON v.target_id=t.id "
-            "LEFT JOIN Exploits_Found e ON e.vuln_id=v.id'"
-            " > " + out + " 2>&1";
-        int rc = exec_stream(cmd);
-        if (rc == 0)
+            "LEFT JOIN Exploits_Found e ON e.vuln_id=v.id";
+        std::string csv_data;
+        int rc = exec_argv(
+            {"sqlite3", "-separator", ",", cfg.db_path, query},
+            0, &csv_data);
+        if (rc == 0) {
+            std::ofstream f(out);
+            f << csv_data;
             std::cout << Tag::OK << Color::green("CSV exported → ") << out << "\n";
-        else
+        } else {
             std::cout << Tag::ERR << "sqlite3 not found or query failed.\n";
+        }
 
     } else if (fmt == "html") {
         // Genera HTML con tabella stilizzata
-        std::string data = exec_capture(
-            "sqlite3 -separator '|' " + cfg.db_path +
-            " 'SELECT t.ip,v.port,v.service,v.version,v.exploit_name,v.has_msf "
-            "FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id'");
+        std::string query =
+            "SELECT t.ip,v.port,v.service,v.version,v.exploit_name,v.has_msf "
+            "FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id";
+        std::string data;
+        exec_argv({"sqlite3", "-separator", "|", cfg.db_path, query}, 0, &data);
 
         std::ofstream f(out);
         f << "<!DOCTYPE html><html><head><meta charset='utf-8'>\n"
