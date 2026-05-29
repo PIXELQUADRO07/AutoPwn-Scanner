@@ -9,10 +9,30 @@ const commandInput = document.getElementById('command-input');
 const executeButton = document.getElementById('execute-button');
 const shellToggle = document.getElementById('shell-toggle');
 const terminalOutput = document.getElementById('terminal-output');
+const scanTypeSelect = document.getElementById('scan-type-select');
+const applyPresetButton = document.getElementById('apply-preset-button');
+const animatedCards = document.querySelectorAll('.card');
 
 let jsonData = null;
 let nmapData = null;
 let terminalHistory = [];
+
+const cardObserver = new IntersectionObserver((entries) => {
+  entries.forEach((entry) => {
+    if (entry.isIntersecting) {
+      entry.target.classList.add('visible');
+      cardObserver.unobserve(entry.target);
+    }
+  });
+}, { threshold: 0.16, rootMargin: '0px 0px -10% 0px' });
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.body.classList.add('js-loaded');
+  animatedCards.forEach((card, index) => {
+    card.style.setProperty('--enter-delay', `${index * 80}ms`);
+    cardObserver.observe(card);
+  });
+});
 
 jsonInput.addEventListener('change', async (event) => {
   const file = event.target.files?.[0];
@@ -44,6 +64,12 @@ commandInput.addEventListener('keydown', (event) => {
     handleCommand();
   }
 });
+applyPresetButton.addEventListener('click', () => runPresetCommand(scanTypeSelect.value));
+
+function runPresetCommand(command) {
+  commandInput.value = command;
+  handleCommand();
+}
 
 async function handleCommand() {
   let cmd = commandInput.value.trim();
@@ -63,12 +89,25 @@ async function handleCommand() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: cmd, shell: useShell })
     });
-    const data = await response.json();
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (parseError) {
+      appendTerminalOutput('Error: unable to parse server response as JSON.');
+      appendTerminalOutput(`Response text: ${text}`);
+      return;
+    }
+
     if (response.ok) {
-      appendTerminalOutput(data.output || '[no output]');
-      appendTerminalOutput(`Exit code: ${data.exitCode}`);
+      appendTerminalOutput(data?.output || '[no output]');
+      appendTerminalOutput(`Exit code: ${data?.exitCode}`);
     } else {
-      appendTerminalOutput(`Error: ${data.error || 'Unknown error'}`);
+      const errorText = data?.error || `Unknown error (HTTP ${response.status} ${response.statusText})`;
+      appendTerminalOutput(`Error: ${errorText}`);
+      if (Object.keys(data || {}).length === 0) {
+        appendTerminalOutput(`Raw response: ${text}`);
+      }
     }
     if (/^(scan\s+|nmap\s+|searchsploit\b)/i.test(cmd) && !useShell) {
       appendTerminalOutput('If files were generated, reload them to update summary.');
@@ -85,8 +124,9 @@ async function handleCommand() {
 function appendTerminalOutput(text) {
   const entry = document.createElement('div');
   entry.textContent = text;
+  entry.className = 'terminal-line';
   terminalOutput.appendChild(entry);
-  terminalOutput.scrollTop = terminalOutput.scrollHeight;
+  terminalOutput.scrollTo({ top: terminalOutput.scrollHeight, behavior: 'smooth' });
 }
 
 function setTerminalLoading(isLoading) {
@@ -118,16 +158,20 @@ function render() {
 
   if (jsonData) {
     resultsSection.classList.remove('hidden');
+    resultsSection.classList.add('visible');
     resultsEl.innerHTML = renderSearchsploitTable(jsonData.exploits);
   } else {
     resultsSection.classList.add('hidden');
+    resultsSection.classList.remove('visible');
   }
 
   if (nmapData) {
     hostsSection.classList.remove('hidden');
+    hostsSection.classList.add('visible');
     hostsEl.innerHTML = renderHostsTable(nmapData.hosts);
   } else {
     hostsSection.classList.add('hidden');
+    hostsSection.classList.remove('visible');
   }
 }
 

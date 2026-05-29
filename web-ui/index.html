@@ -20,9 +20,33 @@
   ─────────────────────────────── v3 ─
   offensive automation — think before you scan</pre>
         <div class="terminal-controls">
-          <input id="command-input" type="text" placeholder="scan 192.168.1.0/24 | nmap 192.168.1.1 | shell: uname -a" />
+          <input id="command-input" type="text" placeholder="scan 192.168.1.0/24 | nmap -A 192.168.1.1 | nmap --script=vuln 192.168.1.1 | shell: uname -a" />
           <button id="execute-button">Run</button>
           <label class="shell-toggle"><input id="shell-toggle" type="checkbox" /> Shell mode</label>
+        </div>
+        <div class="terminal-presets-row">
+          <label for="scan-type-select">Preset scan type</label>
+          <select id="scan-type-select">
+            <option value="scan 192.168.1.0/24">Full scan</option>
+            <option value="nmap 192.168.1.1">Basic TCP</option>
+            <option value="nmap -sS 192.168.1.1">Stealth SYN</option>
+            <option value="nmap -sT 192.168.1.1">TCP Connect</option>
+            <option value="nmap -sU 192.168.1.1">UDP Scan</option>
+            <option value="nmap -sV 192.168.1.1">Version Scan</option>
+            <option value="nmap -A 192.168.1.1">Aggressive</option>
+            <option value="nmap -O 192.168.1.1">OS Detection</option>
+            <option value="nmap -sC 192.168.1.1">Default Scripts</option>
+            <option value="nmap --script=vuln 192.168.1.1">Vuln Scripts</option>
+            <option value="nmap --script=default 192.168.1.1">All Default Scripts</option>
+            <option value="nmap --script=auth 192.168.1.1">Auth Scripts</option>
+            <option value="nmap --script=exploit 192.168.1.1">Exploit Scripts</option>
+            <option value="nmap --script=malware 192.168.1.1">Malware Scripts</option>
+            <option value="nmap -p- 192.168.1.1">All Ports</option>
+            <option value="nmap -Pn 192.168.1.1">No Ping</option>
+            <option value="nmap -T4 192.168.1.1">Timing T4</option>
+            <option value="nmap --traceroute 192.168.1.1">Traceroute</option>
+          </select>
+          <button id="apply-preset-button">Use preset</button>
         </div>
         <div id="terminal-output" class="terminal-output">Type a command and press Run.</div>
       </section>

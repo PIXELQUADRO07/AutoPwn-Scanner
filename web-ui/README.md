@@ -21,7 +21,19 @@ npm install
 npm start
 ```
 
-The server will listen on `http://localhost:4174` and expose a safe command proxy to the local `scanner_runner` tool.
+To develop with live reload and the local backend proxy:
+
+```bash
+cd web-ui
+npm install
+npm run dev
+```
+
+The Vite dev server runs on `http://localhost:4173` and proxies `/api` to the backend server on `http://localhost:4174`.
+
+## Nmap command support
+
+The UI supports direct `nmap` commands such as `nmap -A <target>`, `nmap -sV <target>`, `nmap --script=vuln <target>`, `nmap -O <target>`, `nmap -p- <target>`, and all other standard Nmap scan types.
 
 ## Usage
 

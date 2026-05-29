@@ -14,10 +14,24 @@ body {
   background: radial-gradient(circle at top left, rgba(255, 50, 90, 0.18), transparent 28%),
               radial-gradient(circle at bottom right, rgba(180, 10, 35, 0.2), transparent 24%),
               linear-gradient(180deg, #0a0305 0%, #120308 100%);
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.8s ease, transform 0.8s ease;
+}
+body.js-loaded {
+  opacity: 1;
+  transform: translateY(0);
 }
 #app {
   max-width: 1100px;
   margin: 0 auto;
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity 0.8s ease 0.1s, transform 0.8s ease 0.1s;
+}
+body.js-loaded #app {
+  opacity: 1;
+  transform: translateY(0);
 }
 header {
   margin-bottom: 1.5rem;
@@ -39,6 +53,13 @@ header p {
   box-shadow: 0 30px 80px rgba(255, 40, 90, 0.14);
   padding: 1.6rem;
   margin-bottom: 1.25rem;
+  opacity: 0;
+  transform: translateY(24px);
+  will-change: transform, opacity;
+}
+.card.visible {
+  animation: card-enter 0.75s ease forwards;
+  animation-delay: var(--enter-delay, 0ms);
 }
 .terminal-card {
   padding: 1.6rem;
@@ -60,6 +81,41 @@ header p {
   grid-template-columns: 1fr auto auto;
   align-items: center;
   margin-bottom: 1rem;
+}
+.terminal-presets-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.terminal-presets-row label {
+  font-size: 0.95rem;
+  color: #ffb4c9;
+}
+.terminal-presets-row select {
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 55, 90, 0.35);
+  background: rgba(15, 4, 7, 0.96);
+  color: #ffe2e7;
+}
+.terminal-presets-row button {
+  border: none;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #ff3d63, #90000f);
+  color: white;
+  padding: 0.9rem 1.25rem;
+  cursor: pointer;
+}
+.command-button:hover {
+  background: rgba(255, 50, 90, 0.28);
+  border-color: rgba(255, 75, 110, 0.5);
+  transform: translateY(-1px);
+}
+.command-button:active {
+  transform: translateY(0);
 }
 .terminal-controls input[type="text"] {
   width: 100%;
@@ -102,10 +158,16 @@ header p {
   max-height: 320px;
   color: #ffb9c8;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  scroll-behavior: smooth;
 }
 .terminal-output div {
   white-space: pre-wrap;
   margin: 0.35rem 0;
+}
+.terminal-line {
+  opacity: 0;
+  transform: translateX(-12px);
+  animation: line-reveal 0.32s ease forwards;
 }
 .inputs {
   display: grid;
@@ -160,4 +222,24 @@ footer {
 }
 .error {
   color: #ff3f60;
+}
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes line-reveal {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
 }
