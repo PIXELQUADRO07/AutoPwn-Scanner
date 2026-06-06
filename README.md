@@ -41,7 +41,7 @@ The tool now runs on a split architecture, leveraging the speed of **C++** for c
 ### 🌐 Web UI Dashboard (`/web-ui`)
 * `server.js` (Express Backend): Features a `POST /api/execute` endpoint acting as a local proxy to run `scanner_runner` and handle standard terminal commands via a custom `shell:` wrapper.
 * `index.html`: The main user interface, featuring a browser-based terminal simulator, command inputs, a dedicated **Shell Mode toggle**, and dynamic file upload areas.
-* `src/main.js`: The frontend engine. It streams terminal outputs, parses Nmap XMLs / SearchSploit JSONs on the fly, and renders detailed graphical summary tables.
+* `src/main.js`: The frontend engine. It streams terminal outputs, parses Nmap XMLs / SearchSploit JSONs on the fly, renders detailed graphical summary tables, and now includes a persistent database history dashboard with workspace/session filters and CSV/HTML export.
 * `src/style.css`: A customized, high-contrast **cyberpunk red/black neon theme** for an immersive terminal experience.
 
 ---

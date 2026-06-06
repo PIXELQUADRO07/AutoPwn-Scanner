@@ -169,13 +169,23 @@ class Database:
         with self._lock:
             conn = self._conn()
             conn.executescript("""
+                CREATE TABLE IF NOT EXISTS Sessions (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT,
+                    workspace   TEXT,
+                    scan_path   TEXT,
+                    created_at  TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS Targets (
                     id          INTEGER PRIMARY KEY AUTOINCREMENT,
                     ip          TEXT NOT NULL,
                     hostname    TEXT,
                     os_info     TEXT,
                     arch        TEXT,
-                    scan_time   TEXT NOT NULL
+                    scan_time   TEXT NOT NULL,
+                    session_id  INTEGER REFERENCES Sessions(id),
+                    workspace   TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS Vulnerabilities (
@@ -220,18 +230,39 @@ class Database:
             """)
             conn.commit()
 
+            self._ensure_column(conn, "Targets", "session_id", "INTEGER")
+            self._ensure_column(conn, "Targets", "workspace", "TEXT")
+    def _ensure_column(self, conn, table: str, column: str, col_type: str) -> None:
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        if column not in [row[1] for row in cur.fetchall()]:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type};")
+            conn.commit()
+
     def _now(self) -> str:
         return datetime.now().isoformat()
 
-    def insert_target(self, ip: str, hostname: str = "",
-                      os_info: str = "", arch: str = "") -> int:
+    def insert_session(self, name: str, workspace: str, scan_path: str) -> int:
         with self._lock:
             conn = self._conn()
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO Targets (ip,hostname,os_info,arch,scan_time) "
-                "VALUES (?,?,?,?,?)",
-                (ip, hostname, os_info, arch, self._now()))
+                "INSERT INTO Sessions (name,workspace,scan_path,created_at) "
+                "VALUES (?,?,?,?)",
+                (name, workspace, scan_path, self._now()))
+            conn.commit()
+            return cur.lastrowid
+
+    def insert_target(self, ip: str, hostname: str = "",
+                      os_info: str = "", arch: str = "",
+                      session_id: Optional[int] = None,
+                      workspace: str = "") -> int:
+        with self._lock:
+            conn = self._conn()
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO Targets (ip,hostname,os_info,arch,scan_time,session_id,workspace) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (ip, hostname, os_info, arch, self._now(), session_id, workspace))
             conn.commit()
             return cur.lastrowid
 
@@ -1123,14 +1154,17 @@ class MarkdownReporter:
 class LogicMapper:
     def __init__(self, xml_path: str, json_path: str,
                  monitor_interval: int = MONITOR_INTERVAL,
-                 output_dir: str = "./results"):
+                 output_dir: str = "./results",
+                 workspace: str = "default"):
         self.xml_path         = xml_path
         self.json_path        = json_path
         self.output_dir       = output_dir
+        self.workspace        = workspace
         self.db               = Database(DB_PATH)
         self.msf              = MetasploitManager()
         self.monitor: Optional[MeterpreterMonitor] = None
         self._monitor_interval = monitor_interval
+        self.session_id: Optional[int] = None
         self._session_ids_created: list[int] = []  # per cleanup
 
         # Gestione SIGINT → cleanup ordinato
@@ -1167,6 +1201,10 @@ class LogicMapper:
             self._cleanup()
             return
 
+        session_name = Path(self.xml_path).stem
+        self.session_id = self.db.insert_session(
+            session_name, self.workspace, self.xml_path)
+
         # ── Step 2: Load searchsploit results ────────────────────
         ss_filter = SearchsploitFilter(self.json_path)
 
@@ -1182,7 +1220,10 @@ class LogicMapper:
                  f"OS: {os_info or 'unknown'}  arch: {arch or '?'}")
             print(f"{'─'*56}")
 
-            target_id = self.db.insert_target(ip, hostname, os_info, arch)
+            target_id = self.db.insert_target(
+                ip, hostname, os_info, arch,
+                session_id=self.session_id,
+                workspace=self.workspace)
 
             for port_info in host["ports"]:
                 port      = port_info["port"]
@@ -1348,12 +1389,15 @@ def main():
                     help=f"Session poll interval (default: {MONITOR_INTERVAL})")
     ap.add_argument("--output-dir", default="./results",
                     help="Directory for report output")
+    ap.add_argument("--workspace", default="default",
+                    help="Workspace name for this scan")
     args = ap.parse_args()
 
     mapper = LogicMapper(
         args.xml, args.json,
         args.monitor_interval,
-        args.output_dir)
+        args.output_dir,
+        args.workspace)
     mapper.run()
 
 

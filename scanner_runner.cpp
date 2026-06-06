@@ -6,7 +6,7 @@
  *  FEATURES:
  *  ─────────────────────────────────────────────────────────────
  *  Grafica / UX
- *    • 6 banner ASCII casuali + comando 'banner'
+ *    • 9 built-in banner ASCII + banner esterni da ../msf-banners + comando 'banner'
  *    • Prompt contestuale: autopwn (workspace/target) >
  *    • Progress bar animata con spinner
  *    • Tabelle formattate con bordi Unicode
@@ -53,6 +53,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -69,9 +70,6 @@
 #include <thread>
 #include <vector>
 // POSIX — fork / execvp / waitpid / pipe
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -99,15 +97,12 @@ static constexpr const char* BUILD_DATE = __DATE__;
 // ════════════════════════════════════════════════════════════════
 static bool g_quiet  = false;  // --quiet: sopprime output verboso
 static std::atomic<bool> g_interrupted{false};  // SIGINT handler
-static std::atomic<pid_t> g_current_child{0};
 
 // ════════════════════════════════════════════════════════════════
 //  SIGINT HANDLER  — Ctrl+C torna al prompt senza crashare
 // ════════════════════════════════════════════════════════════════
 static void sigint_handler(int) {
     g_interrupted = true;
-    pid_t child = g_current_child.load();
-    if (child > 0) killpg(child, SIGINT);
     // Newline per non lasciare il cursore su ^C
     write(STDOUT_FILENO, "\n", 1);
 }
@@ -202,214 +197,88 @@ static std::string trim(const std::string& s) {
 
 static std::string sanitize(const std::string& s) {
     std::string o;
-    for (unsigned char c : s) {
-        if (std::isalnum(c) || c == '.' || c == '-' || c == '_')
-            o += c;
-        else if (c == ':')
-            o += '_';
-        else
-            o += '_';
-    }
+    for (char c : s)
+        o += (std::isalnum(static_cast<unsigned char>(c)) || c == '.') ? c : '_';
     return o;
 }
 
 static std::vector<std::string> tokenize(const std::string& line) {
     std::vector<std::string> tok;
-    std::string cur;
-    bool in_double = false;
-    bool in_single = false;
-    bool escaping = false;
-
-    for (char ch : line) {
-        if (escaping) {
-            cur += ch;
-            escaping = false;
-            continue;
-        }
-        if (ch == '\\') {
-            escaping = true;
-            continue;
-        }
-        if (ch == '"' && !in_single) {
-            in_double = !in_double;
-            continue;
-        }
-        if (ch == '\'' && !in_double) {
-            in_single = !in_single;
-            continue;
-        }
-        if (!in_double && !in_single && std::isspace(static_cast<unsigned char>(ch))) {
-            if (!cur.empty()) {
-                tok.push_back(cur);
-                cur.clear();
-            }
-            continue;
-        }
-        cur += ch;
+    std::string cur; bool q = false;
+    for (char c : line) {
+        if (c == '"') { q = !q; continue; }
+        if (c == ' ' && !q) { if (!cur.empty()) { tok.push_back(cur); cur.clear(); } }
+        else cur += c;
     }
     if (!cur.empty()) tok.push_back(cur);
     return tok;
 }
 
 // ── Validazione IP / CIDR ────────────────────────────────────────
-static bool is_valid_ipv4(const std::string& s) {
-    struct in_addr addr;
-    return inet_pton(AF_INET, s.c_str(), &addr) == 1;
-}
-
-static bool is_valid_ipv6(const std::string& s) {
-    struct in6_addr addr6;
-    return inet_pton(AF_INET6, s.c_str(), &addr6) == 1;
-}
-
-static bool valid_cidr(const std::string& s) {
-    auto pos = s.find('/');
-    if (pos == std::string::npos) return false;
-    std::string addr = s.substr(0, pos);
-    std::string mask = s.substr(pos + 1);
-    if (mask.empty() || mask.size() > 3) return false;
-    for (char c : mask)
-        if (!std::isdigit(static_cast<unsigned char>(c)))
-            return false;
-    int mm = std::stoi(mask);
-    if (is_valid_ipv4(addr)) return mm >= 0 && mm <= 32;
-    if (is_valid_ipv6(addr)) return mm >= 0 && mm <= 128;
-    return false;
-}
-
-static bool valid_hostname(const std::string& s) {
-    if (s.empty() || s.size() > 255) return false;
-    static const std::regex host(
-        R"(^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?)*$)"
-    );
-    return std::regex_match(s, host);
-}
-
 static bool valid_ip(const std::string& s) {
-    if (s.empty()) return false;
-    if (is_valid_ipv4(s) || is_valid_ipv6(s)) return true;
-    if (s.find('/') != std::string::npos) return valid_cidr(s);
-    return valid_hostname(s);
+    // IPv4, IPv4/CIDR, hostname semplice
+    static const std::regex ipv4(
+        R"(^(\d{1,3}\.){3}\d{1,3}(/\d{1,2})?$)");
+    static const std::regex host(
+        R"(^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})*$)");
+    return std::regex_match(s, ipv4) || std::regex_match(s, host);
 }
-
 
 // ── exec helpers — usa fork+execve per evitare shell injection ────
 //
 // exec_argv: lancia un programma con argv esplicito (NO shell).
 //   args[0] = path eseguibile, args[1..] = argomenti.
-//   Se timeout_sec > 0 la funzione supervisiona il processo e chiude il gruppo sul timeout.
+//   Se timeout_sec > 0 viene prepeso "timeout <sec>" via execve.
 //   Restituisce exit code; stdout viene letto e stampato in streaming.
 //
-static std::string resolve_executable(const std::string& name) {
-    if (name.empty()) return name;
-    if (name.find('/') != std::string::npos) {
-        return name;
-    }
-    static const std::vector<std::string> search_paths = {
-        "/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin",
-        "/sbin", "/snap/bin"
-    };
-    for (auto& dir : search_paths) {
-        std::string candidate = dir + "/" + name;
-        if (fs::exists(candidate) && fs::is_regular_file(candidate))
-            return candidate;
-    }
-    return name; // fallback to PATH if not found in known locations
-}
-
 static int exec_argv(std::vector<std::string> args,
                      int timeout_sec = 0,
                      std::string* capture = nullptr) {
-    if (args.empty()) return -1;
-    args[0] = resolve_executable(args[0]);
+    // Prependi timeout se richiesto
+    if (timeout_sec > 0) {
+        args.insert(args.begin(), std::to_string(timeout_sec));
+        args.insert(args.begin(), "timeout");
+    }
 
+    // Costruisci array di puntatori const char* per execvp
     std::vector<const char*> argv_ptrs;
     argv_ptrs.reserve(args.size() + 1);
     for (auto& a : args) argv_ptrs.push_back(a.c_str());
     argv_ptrs.push_back(nullptr);
 
+    // Pipe per leggere stdout del figlio
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
     pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]); close(pipefd[1]);
-        return -1;
-    }
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return -1; }
 
     if (pid == 0) {
-        if (setsid() < 0) _exit(127);
+        // Child: redirect stdout sul write-end della pipe
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
         dup2(pipefd[1], STDERR_FILENO);
         close(pipefd[1]);
-        execv(argv_ptrs[0], const_cast<char* const*>(argv_ptrs.data()));
-        _exit(127);
+        // execvp cerca il programma nel PATH
+        execvp(argv_ptrs[0],
+               const_cast<char* const*>(argv_ptrs.data()));
+        _exit(127);  // execvp fallito
     }
 
+    // Parent: leggi dallo read-end
     close(pipefd[1]);
-    g_current_child = pid;
-
-    fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
-    int status = 0;
-    bool timed_out = false;
-    bool finished = false;
-    auto deadline = (timeout_sec > 0)
-                    ? Clock::now() + std::chrono::seconds(timeout_sec)
-                    : Clock::time_point::max();
-
-    struct pollfd pfd{pipefd[0], POLLIN, 0};
-
-    while (!finished) {
-        if (g_interrupted) {
-            killpg(pid, SIGINT);
-        }
-
-        int poll_ret = poll(&pfd, 1, 100);
-        if (poll_ret > 0 && (pfd.revents & POLLIN)) {
-            char buf[512];
-            ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
-            if (n > 0) {
-                buf[n] = '\0';
-                if (capture) *capture += buf;
-                else { std::cout << buf; std::cout.flush(); }
-            }
-        }
-
-        pid_t w = waitpid(pid, &status, WNOHANG);
-        if (w == pid) {
-            finished = true;
-            continue;
-        }
-
-        if (timeout_sec > 0 && Clock::now() >= deadline) {
-            timed_out = true;
-            killpg(pid, SIGKILL);
-            break;
-        }
-
-        if (poll_ret < 0 && errno != EINTR && errno != EAGAIN) {
-            break;
-        }
-    }
-
-    // Read any remaining data after child exits
-    while (true) {
-        char buf[512];
-        ssize_t n = read(pipefd[0], buf, sizeof(buf) - 1);
-        if (n <= 0) break;
+    char buf[512];
+    ssize_t n;
+    while (!g_interrupted &&
+           (n = read(pipefd[0], buf, sizeof(buf) - 1)) > 0) {
         buf[n] = '\0';
         if (capture) *capture += buf;
         else { std::cout << buf; std::cout.flush(); }
     }
-
     close(pipefd[0]);
-    if (!finished)
-        waitpid(pid, &status, 0);
-    g_current_child = 0;
 
-    if (timed_out)
-        return 124;
+    int status = 0;
+    waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
@@ -419,6 +288,121 @@ static int exec_stream(const std::string& cmd, int timeout_sec = 0) {
     auto tok = tokenize(cmd);
     if (tok.empty()) return -1;
     return exec_argv(tok, timeout_sec);
+}
+
+static int run_sudo_command(const std::vector<std::string>& args) {
+    std::vector<std::string> cmd = {"sudo"};
+    cmd.insert(cmd.end(), args.begin(), args.end());
+    std::cout << Tag::INFO << "Running: sudo";
+    for (const auto& a : args) std::cout << " " << a;
+    std::cout << "\n";
+    return exec_argv(cmd);
+}
+
+static int exec_argv_pty(std::vector<std::string> args) {
+    std::vector<std::string> cmd = {"script", "--quiet", "/dev/null", "--"};
+    cmd.insert(cmd.end(), args.begin(), args.end());
+    return exec_argv(std::move(cmd));
+}
+
+static int run_sudo_pty_command(const std::vector<std::string>& args) {
+    std::vector<std::string> cmd = {"sudo"};
+    cmd.insert(cmd.end(), args.begin(), args.end());
+    return exec_argv_pty(std::move(cmd));
+}
+
+static std::string join_tokens(const std::vector<std::string>& tok,
+                               size_t start = 1) {
+    std::string out;
+    for (size_t i = start; i < tok.size(); ++i) {
+        if (i > start) out += ' ';
+        out += tok[i];
+    }
+    return out;
+}
+
+static int run_wifipumpkin3_script(const std::string& script,
+                                   const std::string& iface = "") {
+    std::vector<std::string> args = {"wifipumpkin3"};
+    if (!iface.empty()) {
+        args.push_back("-i");
+        args.push_back(iface);
+    }
+    args.push_back("-x");
+    args.push_back(script + ";exit");
+    return run_sudo_pty_command(args);
+}
+
+static int cmd_wifipumpkin3_preset(const std::vector<std::string>& tok) {
+    if (tok.size() < 3) {
+        std::cout << Tag::ERR << "Usage: wifipumpkin3 preset <interface> [ssid]\n";
+        return 1;
+    }
+    const std::string iface = tok[2];
+    const std::string ssid = tok.size() > 3 ? tok[3] : "AutoPwnScanner";
+    std::cout << Tag::INFO << "Preparing " << iface << " for wifipumpkin3 preset...\n";
+    run_sudo_command({"pkill", "-f", "wifipumpkin3"});
+    run_sudo_command({"airmon-ng", "check", "kill"});
+    run_sudo_command({"ip", "link", "set", iface, "down"});
+    run_sudo_command({"iwconfig", iface, "mode", "monitor"});
+    run_sudo_command({"ip", "link", "set", iface, "up"});
+
+    const std::string script =
+        "set AP_SSID " + ssid + ";"
+        "set dhcpmode dhcp;"
+        "set dhcpconf 0;"
+        "show ap;"
+        "start";
+
+    std::cout << Tag::INFO << "Preset ready. Starting wifipumpkin3 on " << iface << "\n";
+    return run_wifipumpkin3_script(script, iface);
+}
+
+static int cmd_wifipumpkin3(const std::vector<std::string>& tok) {
+    if (tok.size() == 1) {
+        std::vector<std::string> args = {"wifipumpkin3"};
+        return run_sudo_pty_command(args);
+    }
+    const std::string& action = tok[1];
+    if (action == "preset") {
+        return cmd_wifipumpkin3_preset(tok);
+    }
+    if (action == "status") {
+        return run_wifipumpkin3_script("info");
+    }
+    if (action == "start" && tok.size() == 3) {
+        return run_wifipumpkin3_script("start", tok[2]);
+    }
+    if (action == "stop") {
+        return run_wifipumpkin3_script("stop");
+    }
+    if (!action.empty() && action[0] == '-') {
+        std::vector<std::string> args = {"wifipumpkin3"};
+        args.insert(args.end(), tok.begin() + 1, tok.end());
+        return run_sudo_pty_command(args);
+    }
+    const std::string script = join_tokens(tok, 1);
+    return run_wifipumpkin3_script(script);
+}
+
+static int cmd_monitor(const std::vector<std::string>& tok) {
+    if (tok.size() < 3) {
+        std::cout << Tag::ERR << "Usage: monitor start|stop|status <interface>\n";
+        return 1;
+    }
+    const std::string& action = tok[1];
+    const std::string& iface = tok[2];
+    if (action == "start") {
+        return run_sudo_command({"airmon-ng", "start", iface});
+    }
+    if (action == "stop") {
+        return run_sudo_command({"airmon-ng", "stop", iface});
+    }
+    if (action == "status") {
+        return run_sudo_command({"iwconfig", iface});
+    }
+    std::cout << Tag::ERR << "Unknown monitor action: " << action << "\n";
+    return 1;
 }
 
 static std::string exec_capture(const std::string& cmd,
@@ -711,9 +695,8 @@ public:
         while (std::getline(f, line)) {
             line = trim(line);
             if (line.empty() || line[0] == '#') continue;
-            if (line.size() >= 2 && line.front() == '[' && line.back() == ']') {
-                sec = line.substr(1, line.size() - 2);
-                continue;
+            if (line.front() == '[' && line.back() == ']') {
+                sec = line.substr(1, line.size() - 2); continue;
             }
             auto eq = line.find('='); if (eq == std::string::npos) continue;
             std::string k = trim(line.substr(0, eq));
@@ -747,8 +730,79 @@ public:
 // ════════════════════════════════════════════════════════════════
 struct Banner { std::string color, art, tagline; };
 
-static const Banner& random_banner() {
-    static const std::vector<Banner> pool = {
+static std::string strip_color_tokens(std::string text) {
+    std::string out;
+    out.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ) {
+        if (text[i] == '%') {
+            if (i + 1 < text.size() && text[i + 1] == '%') {
+                out.push_back('%');
+                i += 2;
+                continue;
+            }
+            size_t j = i + 1;
+            while (j < text.size() && (std::isalnum(static_cast<unsigned char>(text[j])) || text[j] == '_')) {
+                j++;
+            }
+            i = j;
+            continue;
+        }
+        out.push_back(text[i++]);
+    }
+    return out;
+}
+
+static std::string replace_insensitive(std::string text,
+                                       const std::string& from,
+                                       const std::string& to) {
+    std::string lower(text);
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){ return std::tolower(c); });
+    std::string needle(from);
+    std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c){ return std::tolower(c); });
+
+    size_t pos = 0;
+    while ((pos = lower.find(needle, pos)) != std::string::npos) {
+        text.replace(pos, needle.size(), to);
+        lower.replace(pos, needle.size(), std::string(to.size(), 'x'));
+        pos += to.size();
+    }
+    return text;
+}
+
+static std::vector<Banner> load_external_banners() {
+    std::vector<Banner> banners;
+    fs::path source_file = fs::path(__FILE__);
+    if (source_file.is_relative()) {
+        source_file = fs::absolute(source_file);
+    }
+    fs::path source_dir = source_file.parent_path();
+    fs::path logos_dir = source_dir.parent_path() / "msf-banners" / "metasploit-logos" / "logos";
+    if (!fs::exists(logos_dir) || !fs::is_directory(logos_dir)) {
+        fs::path fallback = fs::current_path().parent_path() / "msf-banners" / "metasploit-logos" / "logos";
+        if (fs::exists(fallback) && fs::is_directory(fallback)) {
+            logos_dir = fallback;
+        } else {
+            return banners;
+        }
+    }
+
+    for (const auto& entry : fs::directory_iterator(logos_dir)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".txt")
+            continue;
+        std::ifstream in(entry.path());
+        if (!in) continue;
+        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        content = strip_color_tokens(std::move(content));
+        content = replace_insensitive(std::move(content), "Metasploit", "AutoPwnScanner");
+        std::string name = entry.path().stem().string();
+        std::replace(name.begin(), name.end(), '-', ' ');
+        banners.push_back({ Color::BCYN, std::move(content), "  [ext] " + name });
+    }
+    return banners;
+}
+
+static std::vector<Banner> build_banner_pool() {
+    std::vector<Banner> pool = {
         { Color::BCYN, R"(
    ___        __       ____                  ___
   / _ | __ __/ /____  / __ \    ___ ___ ___ |_  |
@@ -784,7 +838,7 @@ static const Banner& random_banner() {
 
         { Color::BRED, R"(
   /\  _   _|_  _  |_   /\  / \/  _  _
- /--\(_)_) |_ (_) |_) /--\ \_/\/(/_|
+ /--\(_)_) |_ (_) |_) /--\ \_/\/(/_|)
   ─────────────────────────────── v3 ─)",
           "  offensive automation — think before you scan" },
 
@@ -792,10 +846,45 @@ static const Banner& random_banner() {
   ▄▄▄· ▄• ▄▌▄▄▄▄▄      ▄▄▄·▄▄▌ ▐ ▄▌ ▐ ▄
  ▐█ ▀█ █▪██▌•██  ▪     ▐█ ▄██•  █▌▐█•█▌▐█
  ▄█▀▀█ █▌▐█▌ ▐█.▪ ▄█▀▄  ██▀·██ ▐█▐▐▌▐█▐▐▌
- ▐█ ▪▐▌▐█▄█▌ ▐█▌·▐█▌.▐▌▐█▪·•▐█▌██▐█▌██▐█▌
+ ▐█ ▪▐▌▐█▄█▌ ▐█▌·▐█▌.▐▌�█▪·•▐█▌██▐█▌██▐█▌
   ▀  ▀  ▀▀▀  ▀▀▀  ▀█▄▀▪.▀    ▀▀▀▀ ▀▪▀▀ █▪)",
           "  wake up. the network is waiting." },
+
+        { Color::BCYN, R"(
+     ___    __   __   __   ____  _   _ ___
+    / _ \   \ \ / /   \ \ / /  _ \| | | |_ _|
+   | | | |   \ V /     \ V /| |_) | | | || |
+   | |_| |    | |       | ||  _ <| |_| || |
+    \___/     |_|       |_||_| \_\___/|___|
+)",
+          "  persistence, detection, exploitation in one flow" },
+
+        { Color::BRED, R"(
+   ______ _   _  _   _  _____  __  __
+  |  ____| \ | || \ | ||  __ \|  \/  |
+  | |__  |  \| ||  \| ||  | | \  / |
+  |  __| | . ` || . ` || |  | | |\/| |
+  | |____| |\  || |\  || |__| | |  | |
+  |______|_| \_||_| \_||_____/|_|  |_|
+)",
+          "  scan deeper, move faster, stay stealthy" },
+
+        { Color::BYEL, R"(
+  ____  _   _ _   _    _    _   _  _   _
+ / ___|| | | | \ | |  / \  | \ | || | | |
+ \___ \| | | |  \| | / _ \ |  \| || |_| |
+  ___) | |_| | |\  |/ ___ \| |\  | \___/
+ |____/ \___/|_| \_/_/   \_\_| \_|\___/
+)",
+          "  payloads, persistence, and post-exploit agility" },
     };
+    const auto external = load_external_banners();
+    pool.insert(pool.end(), external.begin(), external.end());
+    return pool;
+}
+
+static const Banner& random_banner() {
+    static const std::vector<Banner> pool = build_banner_pool();
     static std::mt19937 rng(static_cast<unsigned>(
         Clock::now().time_since_epoch().count()));
     std::uniform_int_distribution<size_t> dist(0, pool.size() - 1);
@@ -820,7 +909,8 @@ static void print_banner(const Config& cfg) {
 static const std::vector<std::string> COMMANDS = {
     "scan","nmap","ping","whois","sessions","kill","cleanup",
     "report","export","set","show","workspace","history",
-    "status","banner","config","help","version","exit","quit"
+    "status","banner","clear","monitor","wifipumpkin3",
+    "config","help","version","exit","quit"
 };
 
 #if HAS_READLINE
@@ -894,7 +984,7 @@ static void print_severity_line(const std::string& line) {
     else
         std::cout << Color::DIM << "  " << line << Color::R;
 
-    if (!line.empty() && line.back() != '\n') std::cout << "\n";
+    if (line.back() != '\n') std::cout << "\n";
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -1018,11 +1108,14 @@ public:
 
         auto t0 = Clock::now();
         log.log_cmd("logic_mapper " + xml);
-        int rc = exec_argv(
+        // Usa exec_stream_safe con argv esplicito (no shell injection)
+        int rc = exec_stream_safe(
             {"python3", "./logic_mapper.py",
-             "--xml", xml,
+             "--xml",  xml,
              "--json", json,
-             "--monitor-interval", cfg.monitor_interval},
+             "--monitor-interval", cfg.monitor_interval,
+             "--output-dir", cfg.ws_dir(),
+             "--workspace", cfg.workspace},
             std::stoi(cfg.timeout_msf));
         double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
         print_elapsed(elapsed);
@@ -1050,7 +1143,7 @@ static void cmd_ping(const std::string& target, Logger& log) {
     divider();
 
     auto t0 = Clock::now();
-    int rc = exec_argv({"ping", "-c", "4", "-W", "2", target});
+    int rc = exec_stream("ping -c 4 -W 2 " + target + " 2>&1");
     double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
     print_elapsed(elapsed);
     divider();
@@ -1071,7 +1164,7 @@ static void cmd_whois(const std::string& target, Logger& log) {
     divider();
 
     auto t0 = Clock::now();
-    int rc = exec_argv({"whois", target}, 30);
+    int rc = exec_stream("whois " + target + " 2>&1", 30);
     double elapsed = std::chrono::duration<double>(Clock::now() - t0).count();
     print_elapsed(elapsed);
     divider();
@@ -1101,31 +1194,26 @@ static void cmd_export(const std::vector<std::string>& tok,
 
     if (fmt == "csv") {
         // Usa sqlite3 per dump CSV
-        std::string query =
-            "SELECT t.ip,t.hostname,v.port,v.service,v.version,"
+        std::string cmd =
+            "sqlite3 -separator ',' " + cfg.db_path +
+            " 'SELECT t.ip,t.hostname,v.port,v.service,v.version,"
             "v.exploit_name,v.has_msf,e.success "
             "FROM Vulnerabilities v "
             "LEFT JOIN Targets t ON v.target_id=t.id "
-            "LEFT JOIN Exploits_Found e ON e.vuln_id=v.id";
-        std::string csv_data;
-        int rc = exec_argv(
-            {"sqlite3", "-separator", ",", cfg.db_path, query},
-            0, &csv_data);
-        if (rc == 0) {
-            std::ofstream f(out);
-            f << csv_data;
+            "LEFT JOIN Exploits_Found e ON e.vuln_id=v.id'"
+            " > " + out + " 2>&1";
+        int rc = exec_stream(cmd);
+        if (rc == 0)
             std::cout << Tag::OK << Color::green("CSV exported → ") << out << "\n";
-        } else {
+        else
             std::cout << Tag::ERR << "sqlite3 not found or query failed.\n";
-        }
 
     } else if (fmt == "html") {
         // Genera HTML con tabella stilizzata
-        std::string query =
-            "SELECT t.ip,v.port,v.service,v.version,v.exploit_name,v.has_msf "
-            "FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id";
-        std::string data;
-        exec_argv({"sqlite3", "-separator", "|", cfg.db_path, query}, 0, &data);
+        std::string data = exec_capture(
+            "sqlite3 -separator '|' " + cfg.db_path +
+            " 'SELECT t.ip,v.port,v.service,v.version,v.exploit_name,v.has_msf "
+            "FROM Vulnerabilities v JOIN Targets t ON v.target_id=t.id'");
 
         std::ofstream f(out);
         f << "<!DOCTYPE html><html><head><meta charset='utf-8'>\n"
@@ -1475,12 +1563,15 @@ static void print_help() {
     row("config",    "",                   "Interactive wizard");
     row("workspace", "list|new|use|delete","Manage workspaces");
     std::cout << "\n  " << Color::B << Color::BCYN << "Misc\n" << Color::R;
-    row("status",    "",                   "Live status panel");
-    row("history",   "",                   "Command history");
-    row("banner",    "",                   "New random banner");
-    row("version",   "",                   "Version info");
-    row("help",      "",                   "This help");
-    row("exit",      "",                   "Quit");
+    row("status",      "",                   "Live status panel");
+    row("history",     "",                   "Command history");
+    row("banner",      "",                   "New random banner");
+    row("clear",       "",                   "Clear screen and redraw banner");
+    row("monitor",     "start|stop|status <iface>", "Enable/disable monitor mode");
+    row("wifipumpkin3", "<wp3-command> [args...]", "Run wifipumpkin3 or internal wp3 commands via sudo");
+    row("version",     "",                   "Version info");
+    row("help",        "",                   "This help");
+    row("exit",        "",                   "Quit");
     std::cout << "\n  " << Color::B << "Examples\n" << Color::R;
     std::cout << Color::DIM  << "  autopwn > " << Color::R << "ping 192.168.1.1\n";
     std::cout << Color::DIM  << "  autopwn > " << Color::R << "scan 192.168.1.0/24\n";
@@ -1585,6 +1676,17 @@ static int dispatch(const std::vector<std::string>& tok,
         log.log("[*] cleanup sessions");
         return 0;
     }
+    if (cmd == "clear") {
+        std::cout << "\033[2J\033[3J\033[H" << std::flush;
+        print_banner(cfg);
+        return 0;
+    }
+    if (cmd == "monitor") {
+        return cmd_monitor(tok);
+    }
+    if (cmd == "wifipumpkin3") {
+        return cmd_wifipumpkin3(tok);
+    }
     if (cmd == "report")    { dr.show();              return 0; }
     if (cmd == "export")    { cmd_export(tok,cfg,log);return 0; }
     if (cmd == "set")       { cmd_set(tok,cfg,log);   return 0; }
@@ -1645,6 +1747,11 @@ static void interactive_loop(Config& cfg, Logger& log) {
 //  MAIN
 // ════════════════════════════════════════════════════════════════
 int main(int argc, char* argv[]) {
+    // Disabilita buffering su stdout/stderr — indispensabile quando
+    // il processo è figlio di Node.js o qualsiasi altra pipe.
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
+    std::cout.setf(std::ios::unitbuf);  // flush ad ogni operazione
     // SIGINT → torna al prompt invece di crashare
     struct sigaction sa{};
     sa.sa_handler = sigint_handler;

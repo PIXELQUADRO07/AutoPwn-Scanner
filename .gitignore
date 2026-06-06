@@ -4,7 +4,7 @@ config.ini
 
 results/
 
-
+scanner_runner_test
 scanner_runner
 scanner_runner.exe
 

@@ -1,90 +1,174 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AutoPwn Scanner Web UI</title>
-    <link rel="stylesheet" href="/src/style.css" />
-  </head>
-  <body>
-    <div id="app">
-      <header>
-        <h1>AutoPwn Scanner Web UI</h1>
-        <p>Upload your AutoPwn pipeline outputs and inspect scan data in the browser.</p>
-      </header>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoPwn Scanner Web UI</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <div id="app">
 
-      <section class="card terminal-card">
+    <header>
+      <div class="header-logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="15" stroke="#ff5a7f" stroke-width="1.5" opacity=".4"/>
+          <circle cx="16" cy="16" r="10" stroke="#ff5a7f" stroke-width="1"   opacity=".6"/>
+          <circle cx="16" cy="16" r="5"  stroke="#ff5a7f" stroke-width="1"/>
+          <circle cx="16" cy="16" r="2"  fill="#ff5a7f"/>
+          <line x1="16" y1="1"  x2="16" y2="5"  stroke="#ff5a7f" stroke-width="1.5"/>
+          <line x1="16" y1="27" x2="16" y2="31" stroke="#ff5a7f" stroke-width="1.5"/>
+          <line x1="1"  y1="16" x2="5"  y2="16" stroke="#ff5a7f" stroke-width="1.5"/>
+          <line x1="27" y1="16" x2="31" y2="16" stroke="#ff5a7f" stroke-width="1.5"/>
+        </svg>
+        <div>
+          <h1>AutoPwn Scanner</h1>
+          <p>Offensive automation pipeline — for authorized environments only</p>
+        </div>
+      </div>
+      <div class="header-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span id="status-label">Idle</span>
+      </div>
+    </header>
+
+    <!-- ── TERMINAL ─────────────────────────────────────── -->
+    <section class="card terminal-card">
+      <div class="card-header">
         <h2>Terminal</h2>
-        <pre class="banner">  /\  _   _|_  _  |_   /\  / \/  _  _
+        <div class="terminal-header-actions">
+          <button id="kill-button" class="btn btn-danger" disabled>■ Stop</button>
+          <button class="btn btn-ghost" onclick="document.getElementById('terminal-output').innerHTML=''">Clear</button>
+        </div>
+      </div>
+
+      <pre class="banner">  /\  _   _|_  _  |_   /\  / \/  _  _
  /--\(_)_) |_ (_) |_) /--\ \_/\/(/_|
   ─────────────────────────────── v3 ─
   offensive automation — think before you scan</pre>
-        <div class="terminal-controls">
-          <input id="command-input" type="text" placeholder="scan 192.168.1.0/24 | nmap -A 192.168.1.1 | nmap --script=vuln 192.168.1.1 | shell: uname -a" />
-          <button id="execute-button">Run</button>
-          <label class="shell-toggle"><input id="shell-toggle" type="checkbox" /> Shell mode</label>
-        </div>
-        <div class="terminal-presets-row">
-          <label for="scan-type-select">Preset scan type</label>
-          <select id="scan-type-select">
-            <option value="scan 192.168.1.0/24">Full scan</option>
+
+      <!-- Preset row -->
+      <div class="presets-row">
+        <label for="scan-type-select">Preset</label>
+        <select id="scan-type-select">
+          <optgroup label="Pipeline">
+            <option value="scan 192.168.1.0/24">Full scan (pipeline)</option>
+          </optgroup>
+          <optgroup label="Nmap">
             <option value="nmap 192.168.1.1">Basic TCP</option>
             <option value="nmap -sS 192.168.1.1">Stealth SYN</option>
             <option value="nmap -sT 192.168.1.1">TCP Connect</option>
             <option value="nmap -sU 192.168.1.1">UDP Scan</option>
-            <option value="nmap -sV 192.168.1.1">Version Scan</option>
-            <option value="nmap -A 192.168.1.1">Aggressive</option>
+            <option value="nmap -sV 192.168.1.1">Version Detection</option>
+            <option value="nmap -A 192.168.1.1">Aggressive (-A)</option>
             <option value="nmap -O 192.168.1.1">OS Detection</option>
             <option value="nmap -sC 192.168.1.1">Default Scripts</option>
+            <option value="nmap --script=vulners 192.168.1.1">Vulners Script</option>
             <option value="nmap --script=vuln 192.168.1.1">Vuln Scripts</option>
-            <option value="nmap --script=default 192.168.1.1">All Default Scripts</option>
-            <option value="nmap --script=auth 192.168.1.1">Auth Scripts</option>
-            <option value="nmap --script=exploit 192.168.1.1">Exploit Scripts</option>
-            <option value="nmap --script=malware 192.168.1.1">Malware Scripts</option>
-            <option value="nmap -p- 192.168.1.1">All Ports</option>
-            <option value="nmap -Pn 192.168.1.1">No Ping</option>
-            <option value="nmap -T4 192.168.1.1">Timing T4</option>
-            <option value="nmap --traceroute 192.168.1.1">Traceroute</option>
-          </select>
-          <button id="apply-preset-button">Use preset</button>
+            <option value="nmap -p- 192.168.1.1">All Ports (-p-)</option>
+            <option value="nmap -Pn 192.168.1.1">No Ping (-Pn)</option>
+            <option value="nmap -T4 192.168.1.1">Fast Timing (T4)</option>
+          </optgroup>
+          <optgroup label="CLI Commands">
+            <option value="sessions">List MSF Sessions</option>
+            <option value="cleanup">Kill All Sessions</option>
+            <option value="status">Status Panel</option>
+            <option value="ping 192.168.1.1">Ping Target</option>
+            <option value="whois 192.168.1.1">Whois Target</option>
+            <option value="report">DB Report</option>
+            <option value="help">Help</option>
+          </optgroup>
+        </select>
+        <button id="apply-preset-button" class="btn btn-outline">Use preset</button>
+      </div>
+
+      <!-- Input row -->
+      <div class="terminal-controls">
+        <input id="command-input" type="text" class="term-input"
+               placeholder="scan 192.168.1.0/24  |  nmap -sV 192.168.1.1  |  sessions" />
+        <button id="execute-button" class="btn btn-primary">Run</button>
+        <label class="shell-toggle">
+          <input id="shell-toggle" type="checkbox" />
+          <span>Shell</span>
+        </label>
+      </div>
+
+      <div id="terminal-output" class="terminal-output">
+        <div class="terminal-line info">AutoPwn Scanner Web UI ready. Type a command and press Run.</div>
+      </div>
+    </section>
+
+    <!-- ── LOAD FILES ────────────────────────────────────── -->
+    <section class="card">
+      <div class="card-header"><h2>Load scan results</h2></div>
+      <div class="file-inputs">
+        <label class="file-control">
+          <span class="file-label">SearchSploit JSON</span>
+          <input id="json-file" type="file" accept=".json" />
+          <span class="file-hint">results/ws_default/searchsploit_results.json</span>
+        </label>
+        <label class="file-control">
+          <span class="file-label">Nmap XML</span>
+          <input id="xml-file" type="file" accept=".xml" />
+          <span class="file-hint">results/ws_default/scan_*.xml</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- ── SUMMARY ───────────────────────────────────────── -->
+    <section class="card summary-card">
+      <div class="card-header"><h2>Quick summary</h2></div>
+      <div id="summary" class="summary-empty">No data loaded yet.</div>
+    </section>
+
+    <!-- ── HISTORY ───────────────────────────────────────────────── -->
+    <section class="card history-card">
+      <div class="card-header">
+        <h2>Scan history</h2>
+        <div class="history-actions">
+          <button id="refresh-history" class="btn btn-outline">Refresh</button>
+          <button id="export-csv" class="btn btn-outline">Export CSV</button>
+          <button id="export-html" class="btn btn-outline">Export HTML</button>
         </div>
-        <div id="terminal-output" class="terminal-output">Type a command and press Run.</div>
-      </section>
+      </div>
+      <div class="filters-row">
+        <input id="filter-host" type="text" placeholder="Filter by host / IP" />
+        <input id="filter-port" type="text" placeholder="Filter by port" />
+        <input id="filter-cve" type="text" placeholder="Filter by CVE" />
+        <input id="filter-workspace" type="text" placeholder="Filter by workspace" />
+        <input id="filter-session" type="text" placeholder="Filter by session" />
+      </div>
+      <div id="history-output" class="table-wrap history-output">
+        <p class="summary-empty">Load scan history from the database or run a scan first.</p>
+      </div>
+    </section>
 
-      <section class="card">
-        <h2>Load scan results</h2>
-        <div class="inputs">
-          <label class="file-control">
-            <span>SearchSploit JSON</span>
-            <input id="json-file" type="file" accept=".json" />
-          </label>
-          <label class="file-control">
-            <span>Nmap XML</span>
-            <input id="xml-file" type="file" accept=".xml" />
-          </label>
-        </div>
-        <p class="hint">Use the files generated by <code>./scanner_runner</code> after a scan.</p>
-      </section>
-
-      <section class="card summary-card">
-        <h2>Quick summary</h2>
-        <div id="summary">No data loaded yet.</div>
-      </section>
-
-      <section id="results-section" class="card hidden">
+    <!-- ── RESULTS ───────────────────────────────────────── -->
+    <section id="results-section" class="card hidden">
+      <div class="card-header">
         <h2>SearchSploit findings</h2>
-        <div id="results"></div>
-      </section>
+        <span class="card-badge" id="results-badge">0</span>
+      </div>
+      <div id="results" class="table-wrap"></div>
+    </section>
 
-      <section id="hosts-section" class="card hidden">
-        <h2>Hosts and open ports</h2>
-        <div id="hosts"></div>
-      </section>
+    <!-- ── HOSTS ─────────────────────────────────────────── -->
+    <section id="hosts-section" class="card hidden">
+      <div class="card-header">
+        <h2>Hosts &amp; open ports</h2>
+        <span class="card-badge" id="hosts-badge">0</span>
+      </div>
+      <div id="hosts" class="table-wrap"></div>
+    </section>
 
-      <footer>
-        <p>Run locally with <code>npm install</code> and <code>npm run dev</code>.</p>
-      </footer>
-    </div>
-    <script type="module" src="/src/main.js"></script>
-  </body>
+    <footer>
+      <p>
+        Start with <code>npm run dev</code> (Vite) or <code>node server.js</code> (production).
+        Requires <code>scanner_runner</code> compiled in the repo root.
+      </p>
+    </footer>
+
+  </div><!-- /#app -->
+  <script type="module" src="/src/main.js"></script>
+</body>
 </html>
